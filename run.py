@@ -1,0 +1,204 @@
+import argparse
+import glob
+import os
+import time
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+
+from dataset import dataset
+from model_r import LGUNet_rela
+
+
+def remove_pattern(pattern):
+    for f in glob.glob(pattern):
+        if os.path.isfile(f):
+            os.remove(f)
+
+
+def train(args, model, trainloader, valloader, optimizer, scheduler, device):
+    train_loss = []
+    val_loss = []
+    tmp_train = os.path.join(args.output_dir, f"bt_{args.label_type}.pth")
+    tmp_val = os.path.join(args.output_dir, f"bv_{args.label_type}.pth")
+    remove_pattern(os.path.join(args.output_dir, f"bt_{args.label_type}*.pth"))
+    remove_pattern(os.path.join(args.output_dir, f"bv_{args.label_type}*.pth"))
+
+    for epoch in range(args.num_epochs):
+        t = time.time()
+        train_loss_tmp = []
+        model.train()
+        for g_data, lb_data in trainloader:
+            g_data = g_data.to(device)
+            lb_data = lb_data.to(device)
+            optimizer.zero_grad()
+            lb_pred = model(g_data, lb_data, g_data.batch)
+            loss = abs(lb_pred - lb_data).mean()
+            loss.backward()
+            optimizer.step()
+            train_loss_tmp.append(loss.item())
+        scheduler.step()
+        train_loss_v = sum(train_loss_tmp) / len(train_loss_tmp)
+
+        model.eval()
+        val_loss_tmp = []
+        with torch.no_grad():
+            for g_data, lb_data in valloader:
+                g_data = g_data.to(device)
+                lb_data = lb_data.to(device)
+                lb_pred = model(g_data, lb_data, g_data.batch)
+                loss = abs(lb_pred - lb_data).mean()
+                val_loss_tmp.append(loss.item())
+        val_loss_v = sum(val_loss_tmp) / len(val_loss_tmp)
+
+        train_loss.append(train_loss_v)
+        val_loss.append(val_loss_v)
+        print(
+            "Epoch: {:04d}".format(epoch + 1),
+            "loss_train: {:.4f}".format(train_loss_v),
+            "loss_val: {:.4f}".format(val_loss_v),
+            "time: {:.4f}s".format(time.time() - t),
+        )
+
+        if train_loss_v <= min(train_loss):
+            torch.save(model, tmp_train)
+        if val_loss_v <= min(val_loss):
+            torch.save(model, tmp_val)
+
+    best_train_path = os.path.join(args.output_dir, "best_train_{}.pth".format(args.label_type))
+    best_val_path = os.path.join(args.output_dir, "best_validation_{}.pth".format(args.label_type))
+    if os.path.exists(best_train_path):
+        os.remove(best_train_path)
+    if os.path.exists(best_val_path):
+        os.remove(best_val_path)
+    os.replace(tmp_train, best_train_path)
+    os.replace(tmp_val, best_val_path)
+
+    df = pd.DataFrame(columns=["train_loss", "val_loss"])
+    df["train_loss"] = train_loss
+    df["val_loss"] = val_loss
+    df.to_csv(os.path.join(args.output_dir, "loss_{}.csv".format(args.label_type)), index=False)
+
+
+def evaluate(args, testloader, device):
+    model_t = torch.load(
+        os.path.join(args.output_dir, "best_validation_{}.pth".format(args.label_type))
+    ).to(device)
+    model_t.eval()
+
+    from sklearn.metrics import r2_score, root_mean_squared_error
+    from scipy.stats import pearsonr
+
+    total_rmse = []
+    total_r2 = []
+    total_p = []
+    for _ in range(args.test_repeat):
+        with torch.no_grad():
+            lb_p = []
+            lb_t = []
+            for g_test, lb_test in testloader:
+                g_test = g_test.to(device)
+                lb_test = lb_test.to(device)
+                lb_pred = model_t(g_test, lb_test, g_test.batch)
+                lb_test = lb_test.cpu().numpy()
+                lb_pred = lb_pred.cpu().numpy()
+                lb_t.append(lb_test)
+                lb_p.append(lb_pred)
+            lb_test = np.array(lb_t).squeeze()
+            lb_pred = np.array(lb_p).squeeze()
+            rmse_score = root_mean_squared_error(lb_test, lb_pred)
+            r_square = r2_score(lb_test, lb_pred)
+            p_corr = pearsonr(lb_test, lb_pred)
+            total_rmse.append(rmse_score)
+            total_r2.append(r_square)
+            total_p.append(p_corr)
+
+    df2 = pd.DataFrame(columns=["repeat_rmse", "repeat_r2", "pearson_corr"])
+    df2["repeat_rmse"] = total_rmse
+    df2["repeat_r2"] = total_r2
+    df2["pearson_corr"] = total_p
+    df2.to_csv(
+        os.path.join(args.output_dir, "test_{}.csv".format(args.label_type)),
+        index=False,
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="LG-BrainUNet run entry")
+    parser.add_argument("--dataset_class", type=str, default="dataset", choices=["dataset"])
+    parser.add_argument("--dataset", type=str, default="HCD", choices=["HCP", "HCD"])
+    parser.add_argument("--label_type", type=str, default="CogFluidComp_Unadj")
+
+    parser.add_argument("--use_dataset_cfg", action="store_true")
+    parser.add_argument("--dataset_name", type=str, default="HCD")
+    parser.add_argument("--atlas_name", type=str, default="bna246")
+    parser.add_argument("--sc_kind", type=str, default="FA,fiber_count")
+    parser.add_argument("--sc_kinds", type=str, nargs="+", default=None)
+    parser.add_argument("--fc_kind", type=str, default="pcc_rest")
+
+    parser.add_argument("--num_epochs", type=int, default=30)
+    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--learning_rate", type=float, default=0.01)
+    parser.add_argument("--l2_penalty", type=float, default=0.001)
+    parser.add_argument("--input_dimension", type=int, default=246)
+    parser.add_argument("--hidden_dimension", type=int, default=246)
+    parser.add_argument("--output_dimension", type=int, default=1)
+    parser.add_argument("--depth", type=float, default=3)
+    parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--pool_ratio", type=float, nargs="+", default=[0.5, 0.8, 0.5])
+
+    parser.add_argument("--split_ratio", type=float, nargs=3, default=[0.7, 0.15, 0.15])
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--test_repeat", type=int, default=11)
+    parser.add_argument("--output_dir", type=str, default="./params")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
+    torch.manual_seed(args.seed)
+    torch.set_default_dtype(torch.float64)
+
+    dt = dataset(
+        dsType=args.dataset,
+        labelType=args.label_type,
+        use_dataset_cfg=args.use_dataset_cfg,
+        dataset_name=args.dataset_name,
+        atlas_name=args.atlas_name,
+        sc_kind=args.sc_kind,
+        sc_kinds=args.sc_kinds,
+        fc_kind=args.fc_kind,
+    )
+    dt.setsubset(
+        labelType=args.label_type,
+        labeldim=args.hidden_dimension,
+        split_ratio=args.split_ratio,
+        create_val=True,
+    )
+    trainloader = dt.train_dataloader(batchsize=args.batch)
+    testloader = dt.test_dataloader()
+    valloader = dt.val_dataloader()
+    print("dataset is okay.")
+
+    model = LGUNet_rela(args).to(device)
+    optimizer = torch.optim.Adam(
+        model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
+    )
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=[3, 5, 10, 20, 30], gamma=0.6
+    )
+
+    train(args, model, trainloader, valloader, optimizer, scheduler, device)
+    evaluate(args, testloader, device)
+
+
+if __name__ == "__main__":
+    main()

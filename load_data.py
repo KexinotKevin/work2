@@ -5,6 +5,7 @@ import scipy.sparse as sp
 import os.path as osp
 import torch
 from torch_geometric.data import data as D
+import os
         
 def load_connectivity_matrix(filename, isheader=False):
     if isheader:
@@ -50,19 +51,70 @@ def label_encoding(lb_map, dim=90):
     return encoded_lb
 
 from sklearn.preprocessing import normalize
-def load_data(netDir, subjlist, netname, labelfile, labeltype, labeldim, Isheader, ifBucket=False):
-    sc_fod, fc_fod = netname[0], netname[1]
+
+
+def _resolve_conn_file(base_path):
+    if osp.isfile(base_path):
+        return base_path
+    csv_path = base_path + ".csv"
+    if osp.isfile(csv_path):
+        return csv_path
+    return None
+
+
+def load_data(
+    netDir,
+    subjlist,
+    netname,
+    labelfile,
+    labeltype,
+    labeldim,
+    Isheader,
+    ifBucket=False,
+    sc_netnames=None,
+    fc_netname=None,
+    subject_col="Subject",
+    use_cfg_layout=False,
+    atlas_name=None,
+):
+    if sc_netnames is None or fc_netname is None:
+        sc_fod = netname[0]
+        fc_fod = netname[1]
+        sc_netnames = [sc_fod]
+        fc_netname = fc_fod
+    sc_channel_count = len(sc_netnames)
     graph_list = []
     dt = pd.read_csv(labelfile)
     lb_map = dt[labeltype].values
+    subjlist_set = set([str(s) for s in subjlist if str(s)])
 
     cnt=0
     for k in range(dt.shape[0]):
-        subj = dt.Subject[k]
-        if subj in subjlist:
-            matname = '{}.csv'.format(subj)
-            sc_mat = load_connectivity_matrix(osp.join(netDir, sc_fod, matname))
-            fc_mat = load_connectivity_matrix(osp.join(netDir, fc_fod, matname), isheader=Isheader)
+        subj = str(dt[subject_col][k])
+        if subj in subjlist_set:
+            if use_cfg_layout:
+                if not atlas_name:
+                    raise ValueError("atlas_name is required when use_cfg_layout=True.")
+                sc_mats = []
+                missing_sc = False
+                for sc_name in sc_netnames:
+                    sc_base = osp.join(netDir, atlas_name, subj, "SC", sc_name)
+                    sc_path = _resolve_conn_file(sc_base)
+                    if sc_path is None:
+                        missing_sc = True
+                        break
+                    sc_mats.append(load_connectivity_matrix(sc_path, isheader=True))
+
+                fc_base = osp.join(netDir, atlas_name, subj, "FC", fc_netname)
+                fc_path = _resolve_conn_file(fc_base)
+                if missing_sc or fc_path is None:
+                    continue
+                fc_mat = load_connectivity_matrix(fc_path, isheader=True)
+            else:
+                matname = '{}.csv'.format(subj)
+                sc_mat = load_connectivity_matrix(osp.join(netDir, sc_netnames[0], matname))
+                sc_mats = [sc_mat]
+                fc_mat = load_connectivity_matrix(osp.join(netDir, fc_netname, matname), isheader=Isheader)
             # G = nx.MultiGraph()
             feat = torch.tensor(get_node_feature(len(fc_mat[0])))
             edge_in = []
@@ -80,7 +132,8 @@ def load_data(netDir, subjlist, netname, labelfile, labeltype, labeldim, Isheade
                     edge_out.append(j)
                     # edge_out.append(i)
                     edge_attr = []
-                    edge_attr.append(sc_mat[i][j] if i!=j else edge_attr.append(0))
+                    for sc_mat_item in sc_mats:
+                        edge_attr.append(sc_mat_item[i][j] if i != j else 0)
                     edge_attr.append(fc_mat[i][j] if fc_mat[i][j]>0 else 0)
                     edge_attr.append(abs(fc_mat[i][j]) if fc_mat[i][j]<0 else 0)
                     # G.add_edges_from([(i, j, {"sc": np.log(1+sc_mat[i][j])/(1+np.log(1+sc_mat[i][j]))}),
@@ -91,7 +144,9 @@ def load_data(netDir, subjlist, netname, labelfile, labeltype, labeldim, Isheade
             edge_attr = torch.tensor(edge_attr_l, dtype=feat.dtype, device=feat.device)
             # normalization
             for i in range(len(edge_attr_l[0])):
-                edge_attr[:, 0] = edge_attr[: ,i]/torch.sum(edge_attr[: ,i])
+                denom = torch.sum(edge_attr[:, i])
+                if denom > 0:
+                    edge_attr[:, i] = edge_attr[:, i] / denom
             g_data = D.Data()
             g_data.x, g_data.edge_index, g_data.edge_attr = feat, torch.tensor([edge_in, edge_out]), edge_attr
             # lb = encoded_lb_map[dt[dt['Subject'] == subj].index[0], :]
