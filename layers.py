@@ -59,7 +59,7 @@ class relationGCN(MessagePassing):
             ).to(x.dtype)
 
             # 执行矩阵乘法
-            support = torch.tensor(torch.spmm(adj, x), dtype=x.dtype, device=x.device)
+            support = torch.spmm(adj, x)
             out += torch.matmul(support, w[r])
 
         # norm_edge_attr = [(edge_attr[k, :] / torch.sum(edge_attr[k, :])).unsqueeze(0) for k in
@@ -160,7 +160,7 @@ class RGCN(MessagePassing):
             )
 
             # 执行矩阵乘法
-            support = torch.tensor(torch.spmm(adj, x), dtype=x.dtype)
+            support = torch.spmm(adj, x)
             out += torch.matmul(support, w[r])
 
         # 添加偏置

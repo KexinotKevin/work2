@@ -1,5 +1,5 @@
 from torch.utils.data import Dataset, random_split
-from torch_geometric.data import DataLoader
+from torch_geometric.loader import DataLoader
 from load_data import *
 import os.path as osp
 import pandas as pd

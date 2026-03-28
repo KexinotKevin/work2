@@ -75,7 +75,7 @@ class LGUNet_rela(torch.nn.Module):
         # readout
         x_cl=[]
         for x in xs:
-            glob_x = torch.tensor(torch.cat([gmp(x, batch), gap(x, batch)], dim=1), dtype=x.dtype, device=x.device)
+            glob_x = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
             x_cl.append(F.relu(glob_x))
         x_cl = sum(x_cl)
 
