@@ -7,7 +7,7 @@ python run.py --use_dataset_cfg \
     --atlas_name bna246 \
     --sc_kinds FA fiber_count \
     --fc_kind pcc_rest \
-    --label_types "nih_fluidcogcomp_unadjusted,nih_crycogcomp_unadjusted,nih_totalcogcomp_unadjusted" \
+    --label_types "CogFluidComp_Unadj" \
     --output_root ./results
 
 # replace <combo_dir> with the printed "result combo_dir" path from run.py
