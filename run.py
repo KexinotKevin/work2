@@ -2,7 +2,9 @@ import argparse
 import glob
 import json
 import os
+import sys
 import time
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -10,6 +12,31 @@ import torch
 
 from dataset import dataset
 from model_r import LGUNet_rela
+
+
+def setup_logging(output_root):
+    """设置日志文件，记录终端输出"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = os.path.join(output_root, "train_log")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "{}.log".format(timestamp))
+    
+    class Logger:
+        def __init__(self, filename):
+            self.terminal = sys.stdout
+            self.log = open(filename, "w", encoding="utf-8")
+        
+        def write(self, message):
+            self.terminal.write(message)
+            self.log.write(message)
+        
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+    
+    sys.stdout = Logger(log_file)
+    sys.stderr = sys.stdout
+    return timestamp
 
 
 def remove_pattern(pattern):
@@ -33,12 +60,13 @@ def split_tag(split_ratio):
     return "split_{}_{}_{}".format(vals[0], vals[1], vals[2])
 
 
-def build_combo_dir(args):
+def build_combo_dir(args, timestamp):
     sc_tag = "-".join([sanitize_name(x) for x in args.sc_kinds_resolved])
     fc_tag = sanitize_name(args.fc_kind)
     combo_name = "atlas_{}__sc_{}__fc_{}".format(sanitize_name(args.atlas_name), sc_tag, fc_tag)
     return os.path.join(
         args.output_root,
+        timestamp,
         sanitize_name(args.dataset_name if args.use_dataset_cfg else args.dataset),
         combo_name,
         split_tag(args.split_ratio),
@@ -188,6 +216,7 @@ def parse_args():
 def main():
     args = parse_args()
     os.makedirs(args.output_root, exist_ok=True)
+    timestamp = setup_logging(args.output_root)
     args.sc_kinds_resolved = args.sc_kinds if args.sc_kinds is not None else [x.strip() for x in str(args.sc_kind).split(",") if x.strip()]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -201,7 +230,7 @@ def main():
     if not labels:
         labels = [args.label_type]
 
-    combo_dir = build_combo_dir(args)
+    combo_dir = build_combo_dir(args, timestamp)
     os.makedirs(combo_dir, exist_ok=True)
     print("result combo_dir: {}".format(combo_dir))
     run_meta = {
