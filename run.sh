@@ -2,6 +2,7 @@
 
 conda activate gnn_gpu
 python run.py --use_dataset_cfg \
+    --num_epochs 100 \
     --dataset_name S1200 \
     --atlas_name bna246 \
     --sc_kinds FA fiber_count \

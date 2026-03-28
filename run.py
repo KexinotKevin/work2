@@ -9,6 +9,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 
 from dataset import dataset
 from model_r import LGUNet_rela
@@ -91,7 +92,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             lb_data = lb_data.to(device)
             optimizer.zero_grad()
             lb_pred = model(g_data, lb_data, g_data.batch).squeeze(-1)
-            loss = abs(lb_pred - lb_data).mean()
+            loss = F.smooth_l1_loss(lb_pred, lb_data)
             loss.backward()
             optimizer.step()
             train_loss_tmp.append(loss.item())
@@ -105,7 +106,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
                 g_data = g_data.to(device)
                 lb_data = lb_data.to(device)
                 lb_pred = model(g_data, lb_data, g_data.batch).squeeze(-1)
-                loss = abs(lb_pred - lb_data).mean()
+                loss = F.smooth_l1_loss(lb_pred, lb_data)
                 val_loss_tmp.append(loss.item())
         val_loss_v = sum(val_loss_tmp) / len(val_loss_tmp)
 
@@ -280,7 +281,7 @@ def main():
             model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
         )
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=[10, 20, 25], gamma=0.5
+            optimizer, milestones=[30, 60, 80], gamma=0.5
         )
 
         train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir)
