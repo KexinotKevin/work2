@@ -1,7 +1,7 @@
 #!/bin/bash
 
-PYTHONPATH="/home/shulab/anaconda3/envs/gnn_gpu/bin/python"
-$PYTHONPATH run.py --use_dataset_cfg \
+conda activate gnn_gpu
+python run.py --use_dataset_cfg \
     --num_epochs 100 \
     --dataset_name S1200 \
     --atlas_name bna246 \
