@@ -62,7 +62,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             g_data = g_data.to(device)
             lb_data = lb_data.to(device)
             optimizer.zero_grad()
-            lb_pred = model(g_data, lb_data, g_data.batch)
+            lb_pred = model(g_data, lb_data, g_data.batch).squeeze(-1)
             loss = abs(lb_pred - lb_data).mean()
             loss.backward()
             optimizer.step()
@@ -76,7 +76,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             for g_data, lb_data in valloader:
                 g_data = g_data.to(device)
                 lb_data = lb_data.to(device)
-                lb_pred = model(g_data, lb_data, g_data.batch)
+                lb_pred = model(g_data, lb_data, g_data.batch).squeeze(-1)
                 loss = abs(lb_pred - lb_data).mean()
                 val_loss_tmp.append(loss.item())
         val_loss_v = sum(val_loss_tmp) / len(val_loss_tmp)
@@ -129,7 +129,7 @@ def evaluate(args, testloader, device, label_output_dir):
             for g_test, lb_test in testloader:
                 g_test = g_test.to(device)
                 lb_test = lb_test.to(device)
-                lb_pred = model_t(g_test, lb_test, g_test.batch)
+                lb_pred = model_t(g_test, lb_test, g_test.batch).squeeze(-1)
                 lb_test = lb_test.cpu().numpy()
                 lb_pred = lb_pred.cpu().numpy()
                 lb_t.append(lb_test)
@@ -251,7 +251,7 @@ def main():
             model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
         )
         scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=[3, 5, 10, 20, 30], gamma=0.6
+            optimizer, milestones=[10, 20, 25], gamma=0.5
         )
 
         train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir)

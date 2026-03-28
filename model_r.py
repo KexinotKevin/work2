@@ -84,7 +84,7 @@ class LGUNet_rela(torch.nn.Module):
         out = F.dropout(out, p=self.drop, training=self.training)
         out = F.relu(self.lin2(out))
         out = F.dropout(out, p=self.drop, training=self.training)
-        out = F.relu(self.lin3(out))
+        out = self.lin3(out)
         # out = F.relu(self.lin4(out.t()))
 
         # # task1: label prediction
