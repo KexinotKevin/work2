@@ -30,11 +30,10 @@ class LGUNet_rela(torch.nn.Module):
                                 out_dim=self.hidden_channels,
                                 relation_num=3)
         self.down_convs = nn.ModuleList()
-        # self.pools = nn.ModuleList()
-        # self.down_convs.append(GCNConv(self.in_channels, channels))
+        self.pools = nn.ModuleList()
         for i in range(self.depth):
-            # self.pools.append(LGMVPool(channels, self.pool_ratios[i], 0.3))
-            self.down_convs.append(relationGCN(in_dim=self.in_channels,out_dim=self.hidden_channels,relation_num=3))
+            self.pools.append(LGMVPool(channels, self.pool_ratios[i], 0.3))
+            self.down_convs.append(relationGCN(in_dim=self.hidden_channels, out_dim=self.hidden_channels, relation_num=3))
 
         # build reconstruction
         # in_channels = channels if sum_res else 2 * channels
@@ -62,7 +61,7 @@ class LGUNet_rela(torch.nn.Module):
 
         # encoding process
         for i in range(self.depth):
-            # x, edge_index, edge_weight, batch, perm = self.pools[i](x, edge_index, edge_weight, label_emb, batch)
+            x, edge_index, edge_weight, perm, batch = self.pools[i](x, edge_index, edge_weight, label_emb, batch)
             x, edge_index, edge_weight = self.down_convs[i](x, edge_index, edge_weight)
             x = F.dropout(x, training=self.training, p=0.5)
             x = self.act(x)
@@ -85,33 +84,6 @@ class LGUNet_rela(torch.nn.Module):
         out = F.relu(self.lin2(out))
         out = F.dropout(out, p=self.drop, training=self.training)
         out = self.lin3(out)
-        # out = F.relu(self.lin4(out.t()))
-
-        # # task1: label prediction
-        # graph_emb = global_mean_pool(x, batch)
-        # graph_hid = F.relu(self.pred_projection(graph_emb))
-        # label_pred = self.cluster_projection(graph_hid)
-
-        # task2: cluster
-        # Clustering Assignment (Soft)
-        # q = 1.0 / (1.0 + torch.sum((x_cl.unsqueeze(1) - self.cluster_layer) ** 2, dim=2))
-        # q = q ** 2 / q.sum(1).view(-1, 1)  # Student's t-distribution
-# 
-        # task3: reconstruction
-        # for i in range(self.depth):
-        #     j = self.depth - 1 - i
-        
-        #     res = xs[j]
-        #     edge_index = edge_indices[j]
-        #     edge_weight = edge_weights[j]
-        #     perm = perms[j]
-        
-        #     up = torch.zeros_like(res)
-        #     up[perm] = x
-        #     x = res + up if self.sum_res else torch.cat((res, up), dim=-1)
-        #     x, edge_index, edge_weight = self.up_convs[i](x, edge_index, edge_weight)
-        #     x = F.dropout(x, training=self.training, p=self.drop)
-        #     x = self.act(x)
-        # final_x, final_edge_index, final_edge_weight= self.up_convs[-1](x, edge_index, edge_weight)
-        #
+        out = self.lin3(out)
+        self.saved_edge_weights = edge_weights
         return out

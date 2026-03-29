@@ -188,6 +188,41 @@ def evaluate(args, testloader, device, label_output_dir):
     df2.to_csv(os.path.join(label_output_dir, "test.csv"), index=False)
 
 
+def explain_model(args, testloader, device, label_output_dir):
+    print("\n>>> Extracting Edge-Major Saliency Maps...")
+    model_t = torch.load(
+        os.path.join(label_output_dir, "best_validation.pth"),
+        weight_only=False,
+    ).to(device)
+    model_t.eval()
+
+    all_saliency = []
+    all_survival = []
+
+    for g_test, lb_test in testloader:
+        g_test, lb_test = g_test.to(device), lb_test.to(device)
+
+        # 允许计算关于输入边属性的梯度
+        g_test.edge_attr.requires_grad = True
+
+        lb_pred = model_t(g_test, lb_test, g_test.batch).squeeze(-1)
+        loss = torch.abs(lb_pred - lb_test).mean()
+        loss.backward()
+
+        # 提取显著性图
+        saliency = g_test.edge_attr.grad.abs().cpu().numpy()
+        all_saliency.append(saliency)
+
+        # 提取生存图
+        survival = model_t.saved_edge_weights[-1].detach().cpu().numpy()
+        all_survival.append(survival)
+
+    # 存盘
+    np.save(os.path.join(label_output_dir, "saliency_maps.npy"), np.array(all_saliency, dtype=object))
+    np.save(os.path.join(label_output_dir, "survival_weights.npy"), np.array(all_survival, dtype=object))
+    print(f"Interpretability evidence saved to {label_output_dir}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="LG-BrainUNet run entry")
     parser.add_argument("--dataset_class", type=str, default="dataset", choices=["dataset"])
@@ -292,6 +327,7 @@ def main():
 
         train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir)
         evaluate(args, testloader, device, label_output_dir)
+        explain_model(args, testloader, device, label_output_dir)
 
 
 if __name__ == "__main__":
