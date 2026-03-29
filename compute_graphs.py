@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 
+import matplotlib
+matplotlib.use('Agg')  # 【新增】防止在服务器运行时报错
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -19,7 +21,7 @@ def read_label_name_from_dir(label_dir):
     return base[len("label_") :] if base.startswith("label_") else base
 
 
-def collect_label_results(combo_dir):
+def collect_label_results(combo_dir, label_filter=None):
     rows = []
     label_entries = []
     for name in sorted(os.listdir(combo_dir)):
@@ -28,6 +30,11 @@ def collect_label_results(combo_dir):
             continue
 
         display_label = read_label_name_from_dir(label_dir)
+        
+        # 如果指定了label过滤，则只处理匹配的label
+        if label_filter and display_label not in label_filter:
+            continue
+        
         label_entries.append((label_dir, display_label))
 
         loss_csv = os.path.join(label_dir, "loss.csv")
@@ -96,7 +103,7 @@ def plot_metric_bars(summary_df, out_dir):
     plt.close()
 
 
-def plot_interpretability(combo_dir, out_dir, coords):
+def plot_interpretability(combo_dir, out_dir, coords, label_filter=None):
     """自动遍历各个预测任务，生成 Saliency 解释图"""
     for name in sorted(os.listdir(combo_dir)):
         label_dir = os.path.join(combo_dir, name)
@@ -104,6 +111,11 @@ def plot_interpretability(combo_dir, out_dir, coords):
             continue
         
         display_label = read_label_name_from_dir(label_dir)
+        
+        # 如果指定了label过滤，则只处理匹配的label
+        if label_filter and display_label not in label_filter:
+            continue
+        
         sal_file = os.path.join(label_dir, "saliency_maps.npy")
         idx_file = os.path.join(label_dir, "edge_indices.npy")
         
@@ -126,6 +138,7 @@ def parse_args():
     parser.add_argument("--combo_dir", type=str, required=True)
     parser.add_argument("--atlas", type=str, required=True)
     parser.add_argument("--plots_dir", type=str, default="")
+    parser.add_argument("--label", type=str, default="", help="指定要处理的label名称，多个用逗号分隔，为空则处理全部")
     return parser.parse_args()
 
 
@@ -135,10 +148,16 @@ def main():
     if not os.path.isdir(combo_dir):
         raise FileNotFoundError(f"combo_dir not found: {combo_dir}")
 
+    # 解析label过滤参数
+    label_filter = None
+    if args.label:
+        label_filter = set(x.strip() for x in args.label.split(",") if x.strip())
+        print(f"Filtering labels: {label_filter}")
+
     out_dir = args.plots_dir if args.plots_dir else os.path.join(combo_dir, "plots")
     os.makedirs(out_dir, exist_ok=True)
 
-    summary_df, label_entries = collect_label_results(combo_dir)
+    summary_df, label_entries = collect_label_results(combo_dir, label_filter)
     if summary_df.empty:
         raise RuntimeError(f"No valid label results found under {combo_dir}")
 
@@ -153,7 +172,7 @@ def main():
     # coords = get_coords(nib.load(atlas['maps'])) 
     coords=np.load(f'/media/shulab/WD_10T/projects/work1/coords/{args.atlas}.npy')
     
-    plot_interpretability(combo_dir, out_dir, coords)
+    plot_interpretability(combo_dir, out_dir, coords, label_filter)
     # --------------------------------------------------
 
     meta_path = os.path.join(combo_dir, "run_meta.json")
