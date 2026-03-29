@@ -379,6 +379,12 @@ class LGMVPool(nn.Module):
 
         # edge learning
         new_edge_index, new_edge_attr = add_remaining_self_loops(induced_edge_index, induced_edge_attr, 0, x.size(0))
+        
+        # 【新增修复】显式对边进行排序，满足 sparsemax 内部对 batch(row) 连续递增的严格依赖
+        sort_idx = torch.argsort(new_edge_index[0])
+        new_edge_index = new_edge_index[:, sort_idx]
+        new_edge_attr = new_edge_attr[sort_idx]
+        
         row, col = new_edge_index
         # 对每个关系单独计算权重
         weights = (torch.cat([x[row], x[col]], dim=1) * self.att).sum(dim=-1)
