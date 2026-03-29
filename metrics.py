@@ -24,3 +24,13 @@ def rmse(y_true, y_pred):
     mse = torch.mean((y_true - y_pred) ** 2)
     rmse = torch.sqrt(mse)
     return rmse.item()
+
+
+def mae(y_true, y_pred):
+    """
+    计算平均绝对误差（MAE）。
+    :param y_true: 真实标签，形状为 (n_samples,)
+    :param y_pred: 预测标签，形状为 (n_samples,)
+    :return: MAE值
+    """
+    return torch.mean(torch.abs(y_true - y_pred)).item()

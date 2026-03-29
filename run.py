@@ -146,12 +146,12 @@ def evaluate(args, testloader, device, label_output_dir):
     ).to(device)
     model_t.eval()
 
-    from sklearn.metrics import r2_score, root_mean_squared_error
+    from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
     from scipy.stats import pearsonr
 
-    total_rmse = []
-    total_r2 = []
-    total_p = []
+    total_rmse, total_mae, total_r2, total_p = [], [], [], []
+    
+    print(f"\n>>> Starting Evaluation for Label: {label_output_dir}")
     for _ in range(args.test_repeat):
         with torch.no_grad():
             lb_p = []
@@ -160,27 +160,32 @@ def evaluate(args, testloader, device, label_output_dir):
                 g_test = g_test.to(device)
                 lb_test = lb_test.to(device)
                 lb_pred = model_t(g_test, lb_test, g_test.batch).squeeze(-1)
-                lb_test = lb_test.cpu().numpy()
-                lb_pred = lb_pred.cpu().numpy()
-                lb_t.append(lb_test)
-                lb_p.append(lb_pred)
-            lb_test = np.array(lb_t).squeeze()
-            lb_pred = np.array(lb_p).squeeze()
-            rmse_score = root_mean_squared_error(lb_test, lb_pred)
-            r_square = r2_score(lb_test, lb_pred)
-            p_corr = pearsonr(lb_test, lb_pred)
-            total_rmse.append(rmse_score)
-            total_r2.append(r_square)
-            total_p.append(p_corr)
+                lb_t.append(lb_test.cpu().numpy())
+                lb_p.append(lb_pred.cpu().numpy())
+            
+            lb_test = np.array(lb_t).flatten()
+            lb_pred = np.array(lb_p).flatten()
+            
+            total_rmse.append(root_mean_squared_error(lb_test, lb_pred))
+            total_mae.append(mean_absolute_error(lb_test, lb_pred))
+            total_r2.append(r2_score(lb_test, lb_pred))
+            total_p.append(pearsonr(lb_test, lb_pred)[0])
 
-    df2 = pd.DataFrame(columns=["repeat_rmse", "repeat_r2", "pearson_corr"])
-    df2["repeat_rmse"] = total_rmse
-    df2["repeat_r2"] = total_r2
-    df2["pearson_corr"] = total_p
-    df2.to_csv(
-        os.path.join(label_output_dir, "test.csv"),
-        index=False,
-    )
+    # 打印到终端
+    print(f"Test Results over {args.test_repeat} repeats:")
+    print(f"  RMSE: {np.mean(total_rmse):.4f} ± {np.std(total_rmse):.4f}")
+    print(f"  MAE:  {np.mean(total_mae):.4f} ± {np.std(total_mae):.4f}")
+    print(f"  R2:   {np.mean(total_r2):.4f} ± {np.std(total_r2):.4f}")
+    print(f"  Pearson r: {np.mean(total_p):.4f} ± {np.std(total_p):.4f}")
+
+    # 保存到 CSV
+    df2 = pd.DataFrame({
+        "repeat_rmse": total_rmse,
+        "repeat_mae": total_mae,
+        "repeat_r2": total_r2,
+        "pearson_corr": total_p
+    })
+    df2.to_csv(os.path.join(label_output_dir, "test.csv"), index=False)
 
 
 def parse_args():
