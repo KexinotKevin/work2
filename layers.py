@@ -392,10 +392,12 @@ class LGMVPool(nn.Module):
             tmp_adj = torch.zeros((x.size(0), x.size(0)), dtype=tmp_act_wt.dtype, device=x.device)
             tmp_adj[row, col] = tmp_act_wt
             new_idx, new_wt = dense_to_sparse(tmp_adj)
-            row, col = new_idx
-            sparsed_attr = torch.tensor(self.sparse_attention(new_wt, row), dtype=tmp_act_wt.dtype)
-            tmp_adj[row, col] = sparsed_attr
-            adj[row, col, i] = tmp_adj[row, col]
+            
+            # 使用新变量名，避免污染原有的 row 和 col
+            new_row, new_col = new_idx
+            sparsed_attr = torch.tensor(self.sparse_attention(new_wt, new_row), dtype=tmp_act_wt.dtype)
+            tmp_adj[new_row, new_col] = sparsed_attr
+            adj[new_row, new_col, i] = tmp_adj[new_row, new_col]
 
         new_edge_index = torch.nonzero(adj[:, :, 0] != 0, as_tuple=False).t()  # [2, num_edges]
         new_edge_attr = adj[new_edge_index[0], new_edge_index[1]]  # [num_edges, 3]
