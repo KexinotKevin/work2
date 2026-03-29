@@ -5,6 +5,9 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from vis import build_saliency_matrix, plot_saliency_results, get_coords  # 新增
+from nilearn.datasets import fetch_atlas_aal  # 新增
+import nibabel as nib  # 新增
 
 
 def read_label_name_from_dir(label_dir):
@@ -93,6 +96,31 @@ def plot_metric_bars(summary_df, out_dir):
     plt.close()
 
 
+def plot_interpretability(combo_dir, out_dir, coords):
+    """自动遍历各个预测任务，生成 Saliency 解释图"""
+    for name in sorted(os.listdir(combo_dir)):
+        label_dir = os.path.join(combo_dir, name)
+        if not os.path.isdir(label_dir) or not name.startswith("label_"):
+            continue
+        
+        display_label = read_label_name_from_dir(label_dir)
+        sal_file = os.path.join(label_dir, "saliency_maps.npy")
+        idx_file = os.path.join(label_dir, "edge_indices.npy")
+        
+        if os.path.isfile(sal_file) and os.path.isfile(idx_file):
+            print(f"Plotting Saliency Maps for {display_label}...")
+            saliency_data = np.load(sal_file, allow_pickle=True)
+            edge_indices = np.load(idx_file, allow_pickle=True)
+            
+            # 将每个样本转为动态大小的邻接矩阵
+            sal_matrices = []
+            for e_idx, s_attr in zip(edge_indices, saliency_data):
+                sal_matrices.append(build_saliency_matrix(e_idx, s_attr))
+            
+            # 调用 vis.py 进行画图
+            plot_saliency_results(sal_matrices, coords, out_dir, display_label)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot result graphs for multi-label runs")
     parser.add_argument("--combo_dir", type=str, required=True)
@@ -116,6 +144,16 @@ def main():
     summary_df.to_csv(os.path.join(out_dir, "summary_by_label.csv"), index=False)
     plot_loss_curves(label_entries, out_dir)
     plot_metric_bars(summary_df, out_dir)
+
+    # ------------------ 新增调用部分 ------------------
+    print("Loading Brain Atlas coordinates...")
+    atlas = fetch_atlas_aal()
+    # 注意: fetch_atlas_aal 提供 116 节点坐标。如果在其它数据集(如246节点)上运行，
+    # vis.py 中的安全检查会自动跳过 3D 脑图，但热力图依然会成功生成。
+    coords = get_coords(nib.load(atlas['maps'])) 
+    
+    plot_interpretability(combo_dir, out_dir, coords)
+    # --------------------------------------------------
 
     meta_path = os.path.join(combo_dir, "run_meta.json")
     if os.path.isfile(meta_path):

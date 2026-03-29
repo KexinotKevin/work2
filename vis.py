@@ -128,3 +128,56 @@ def plot_distribution(idmap, kind):
             plt.title(f"Value {i + 1}-{j+1} Frequency (Significant)")
             plt.tight_layout()
             plt.savefig("significant_{}_{}_{}.pdf".format(kind, i+1, j+1), dpi = 800)
+
+
+def build_saliency_matrix(edge_index, saliency_attr, num_nodes=None):
+    """将一维的显著性向量还原为全连接矩阵 (动态推断节点数量)"""
+    # 动态推断节点数：最大索引值 + 1
+    if num_nodes is None:
+        num_nodes = int(np.max(edge_index)) + 1
+        
+    sal_mat = np.zeros((num_nodes, num_nodes))
+    
+    # 将多关系的梯度求平均，代表这条边的整体重要性
+    if len(saliency_attr.shape) > 1:
+        importance = np.mean(saliency_attr, axis=1) 
+    else:
+        importance = saliency_attr
+
+    for k in range(edge_index.shape[1]):
+        i, j = int(edge_index[0, k]), int(edge_index[1, k])
+        sal_mat[i, j] = importance[k]
+        sal_mat[j, i] = importance[k] # 保证对称
+        
+    return sal_mat
+
+
+def plot_saliency_results(saliency_matrices, coords, out_dir, label_name):
+    """绘制平均显著性热力图和Top-K大脑连接图"""
+    import os
+    mean_saliency = np.mean(saliency_matrices, axis=0)
+    
+    # 1. 绘制显著性热力图 (Heatmap)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(mean_saliency, cmap="Reds", square=True)
+    plt.title(f"Average Saliency Map: {label_name}")
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, f"saliency_heatmap_{label_name}.pdf"), dpi=300)
+    plt.close()
+
+    # 2. 绘制大脑 3D 连接图 (Connectome)
+    # 提取非零特征来计算阈值，仅展示最重要的前 2% 的边
+    non_zero_saliency = mean_saliency[mean_saliency > 0]
+    if len(non_zero_saliency) > 0:
+        threshold = np.percentile(non_zero_saliency, 98)
+        
+        # 安全检查：只有当图谱坐标节点数与邻接矩阵维度一致时，才能画 3D 脑图
+        if len(coords) == mean_saliency.shape[0]:
+            fig = plt.figure(figsize=(10, 5))
+            plot_connectome(mean_saliency, coords, edge_threshold=threshold, 
+                            title=f"Top Saliency Connectome: {label_name}",
+                            figure=fig, node_size=20, edge_kwargs={'lw': 2})
+            fig.savefig(os.path.join(out_dir, f"saliency_connectome_{label_name}.pdf"), dpi=300)
+            plt.close()
+        else:
+            print(f"Warning: Connectome plot skipped for {label_name}. Coordinates length ({len(coords)}) does not match matrix dimension ({mean_saliency.shape[0]}).")

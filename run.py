@@ -198,6 +198,7 @@ def explain_model(args, testloader, device, label_output_dir):
 
     all_saliency = []
     all_survival = []
+    all_edge_indices = []  # 【新增】初始化存放边索引的列表
 
     for g_test, lb_test in testloader:
         g_test, lb_test = g_test.to(device), lb_test.to(device)
@@ -216,10 +217,15 @@ def explain_model(args, testloader, device, label_output_dir):
         # 提取生存图
         survival = model_t.saved_edge_weights[-1].detach().cpu().numpy()
         all_survival.append(survival)
+        
+        # 【新增】保存当前图的边索引
+        all_edge_indices.append(g_test.edge_index.cpu().numpy())
 
     # 存盘
     np.save(os.path.join(label_output_dir, "saliency_maps.npy"), np.array(all_saliency, dtype=object))
     np.save(os.path.join(label_output_dir, "survival_weights.npy"), np.array(all_survival, dtype=object))
+    # 【新增】存盘边索引
+    np.save(os.path.join(label_output_dir, "edge_indices.npy"), np.array(all_edge_indices, dtype=object))
     print(f"Interpretability evidence saved to {label_output_dir}")
 
 
