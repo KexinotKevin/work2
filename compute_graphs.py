@@ -124,6 +124,7 @@ def plot_interpretability(combo_dir, out_dir, coords):
 def parse_args():
     parser = argparse.ArgumentParser(description="Plot result graphs for multi-label runs")
     parser.add_argument("--combo_dir", type=str, required=True)
+    parser.add_argument("--atlas", type=str, required=True)
     parser.add_argument("--plots_dir", type=str, default="")
     return parser.parse_args()
 
@@ -147,10 +148,10 @@ def main():
 
     # ------------------ 新增调用部分 ------------------
     print("Loading Brain Atlas coordinates...")
-    atlas = fetch_atlas_aal()
     # 注意: fetch_atlas_aal 提供 116 节点坐标。如果在其它数据集(如246节点)上运行，
     # vis.py 中的安全检查会自动跳过 3D 脑图，但热力图依然会成功生成。
-    coords = get_coords(nib.load(atlas['maps'])) 
+    # coords = get_coords(nib.load(atlas['maps'])) 
+    coords=np.load(f'/media/shulab/WD_10T/projects/work1/coords/{args.atlas}.npy')
     
     plot_interpretability(combo_dir, out_dir, coords)
     # --------------------------------------------------
