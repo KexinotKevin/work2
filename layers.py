@@ -385,25 +385,22 @@ class LGMVPool(nn.Module):
         # print(weights.size())
         # norm_edge_attr = [new_edge_attr[k, :]/torch.sum(new_edge_attr[k, :]) for k in range(new_edge_attr.size(0))]
         # weights = torch.tensor([torch.matmul(new_edge_attr[k, :], new_edge_attr[k, :].t()) for k in range(new_edge_attr.size(0))], dtype=x.dtype, device=x.device)
-        adj = torch.zeros((x.size(0), x.size(0), new_edge_attr.size(1)), dtype=torch.float64, device=x.device)
-        for i in range(induced_edge_attr.size(1)):  # 遍历每个关系
+        new_attr_list = []
+        for i in range(new_edge_attr.size(1)):
             tmp_wt = new_edge_attr[:, i]
             tmp_act_wt = self.lamb * tmp_wt + F.leaky_relu(weights, self.negative_slop)
-            tmp_adj = torch.zeros((x.size(0), x.size(0)), dtype=tmp_act_wt.dtype, device=x.device)
-            tmp_adj[row, col] = tmp_act_wt
-            new_idx, new_wt = dense_to_sparse(tmp_adj)
             
-            # 使用新变量名，避免污染原有的 row 和 col
-            new_row, new_col = new_idx
-            sparsed_attr = torch.tensor(self.sparse_attention(new_wt, new_row), dtype=tmp_act_wt.dtype)
-            tmp_adj[new_row, new_col] = sparsed_attr
-            adj[new_row, new_col, i] = tmp_adj[new_row, new_col]
+            # 1. 使用 .clone() 避免 Sparsemax 内部的 in-place 操作报错
+            # 2. 使用 .to(...) 替代 torch.tensor(...) 保持梯度图连接，消灭 Warning
+            sparsed_attr = self.sparse_attention(tmp_act_wt.clone(), row).to(tmp_act_wt.dtype)
+            new_attr_list.append(sparsed_attr)
 
-        new_edge_index = torch.nonzero(adj[:, :, 0] != 0, as_tuple=False).t()  # [2, num_edges]
-        new_edge_attr = adj[new_edge_index[0], new_edge_index[1]]  # [num_edges, 3]
+        new_edge_attr = torch.stack(new_attr_list, dim=1)
 
-        del adj
-        torch.cuda.empty_cache()
+        # 过滤掉 relation 0 中权重为 0 的边 (与原版 adj[:, :, 0] != 0 的语义严格保持一致)
+        mask = new_edge_attr[:, 0] != 0
+        new_edge_index = new_edge_index[:, mask]
+        new_edge_attr = new_edge_attr[mask]
 
         return x, new_edge_index, new_edge_attr, perm, batch
 
