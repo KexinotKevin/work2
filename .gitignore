@@ -6,3 +6,6 @@
 *baseline_models*
 
 *ignore*
+*plots*
+*.tex
+*gitignore*
