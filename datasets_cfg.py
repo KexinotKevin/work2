@@ -10,14 +10,14 @@ atlases = {
         "schaefer200_S1",
         "schaefer500_S4"
     ],
-    "ATLAS_DIR": "/media/shulab/WD_10T/datasets/utils/mergedAtlas/Lin6/"
+    "ATLAS_DIR": "/public/home/baitianyu/kexin/datasets/utils/mergedAtlas/Lin6/"
 }
 
 datasets = {
     "HCD":{
-        "conn_dir": "/media/shulab/WD_10T/datasets/HCD/network",
-        "scores_path": "/media/shulab/WD_10T/datasets/HCD/textfiles/cogcomp.csv",
-        "demographics_path":"/media/shulab/WD_10T/datasets/HCD/textfiles/HCD_LS_2.0_subject_completeness.csv",
+        "conn_dir": "/public/home/baitianyu/kexin/datasets/HCD/network",
+        "scores_path": "/public/home/baitianyu/kexin/datasets/HCD/textfiles/cogcomp.csv",
+        "demographics_path":"/public/home/baitianyu/kexin/datasets/HCD/textfiles/HCD_LS_2.0_subject_completeness.csv",
         "tgt_label_list": ['src_subject_id', 'sex', 'interview_age', 
             'nih_fluidcogcomp_unadjusted', 'nih_fluidcogcomp_ageadjusted', 
             'nih_crycogcomp_unadjusted', 'nih_crycogcomp_ageadjusted', 
@@ -39,10 +39,10 @@ datasets = {
     },
     
     "ABCD":{
-        "conn_dir": "/media/shulab/WD_10T/datasets/ABCD/network/site16",
-        # "scores_path": "/media/shulab/WD_10T/datasets/ABCD/textfiles/neurocognition/nc_y_nihtb.csv",
-        "scores_path":"/media/shulab/WD_10T/datasets/ABCD/textfiles/abcd_baseline_rearranged_scores.csv",
-        "demographics_path": "/media/shulab/WD_10T/datasets/ABCD/textfiles/abcd-general/abcd_p_demo.csv",
+        "conn_dir": "/public/home/baitianyu/kexin/datasets/ABCD/network/site16",
+        # "scores_path": "/public/home/baitianyu/kexin/datasets/ABCD/textfiles/neurocognition/nc_y_nihtb.csv",
+        "scores_path":"/public/home/baitianyu/kexin/datasets/ABCD/textfiles/abcd_baseline_rearranged_scores.csv",
+        "demographics_path": "/public/home/baitianyu/kexin/datasets/ABCD/textfiles/abcd-general/abcd_p_demo.csv",
         "tgt_label_list": ['src_subject_id', 'demo_sex_v2', 'demo_brthdat_v2',
             'nihtbx_fluidcomp_uncorrected', 'nihtbx_fluidcomp_agecorrected',
             'nihtbx_cryst_uncorrected', 'nihtbx_cryst_agecorrected',
@@ -61,9 +61,9 @@ datasets = {
     },
     
     "S1200":{
-        "conn_dir": "/media/shulab/WD_10T/datasets/S1200/network",
-        "scores_path": "/media/shulab/WD_10T/datasets/S1200/textfiles/S1200_889_CogScores.csv",
-        "demographics_path":"/media/shulab/WD_10T/datasets/S1200/textfiles/S1200_free_demographics_full-MRI_889.csv",
+        "conn_dir": "/public/home/baitianyu/kexin/datasets/S1200/network",
+        "scores_path": "/public/home/baitianyu/kexin/datasets/S1200/textfiles/S1200_889_CogScores.csv",
+        "demographics_path":"/public/home/baitianyu/kexin/datasets/S1200/textfiles/S1200_free_demographics_full-MRI_889.csv",
         "tgt_label_list": ['Subject', 'Gender', 'Age', 
                            'CogFluidComp_Unadj', 'CogFluidComp_AgeAdj',
                            'CogEarlyComp_Unadj', 'CogEarlyComp_AgeAdj', 'CogTotalComp_Unadj',

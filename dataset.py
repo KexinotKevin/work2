@@ -58,7 +58,7 @@ class dataset():
         fc_kind="pcc_rest",
     ):
         super().__init__()
-        self.dsDir = "/media/shulab/WD_10T/datasets/"
+        self.dsDir = "/public/home/baitianyu/kexin/datasets/"
         self.dsType = dsType
         self.labelType = labelType
         self.use_dataset_cfg = use_dataset_cfg
