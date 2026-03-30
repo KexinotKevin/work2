@@ -142,7 +142,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
 def evaluate(args, testloader, device, label_output_dir):
     model_t = torch.load(
         os.path.join(label_output_dir, "best_validation.pth"),
-        weight_only=False,
+        weights_only=False,
     ).to(device)
     model_t.eval()
 
@@ -192,7 +192,7 @@ def explain_model(args, testloader, device, label_output_dir):
     print("\n>>> Extracting Edge-Major Saliency Maps...")
     model_t = torch.load(
         os.path.join(label_output_dir, "best_validation.pth"),
-        weight_only=False,
+        weights_only=False,
     ).to(device)
     model_t.eval()
 

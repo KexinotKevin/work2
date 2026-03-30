@@ -40,7 +40,7 @@ def main():
     testloader = dt.test_dataloader()
 
     # 加载模型
-    model = torch.load(args.model_path, weight_only=False).to(device)
+    model = torch.load(args.model_path, weights_only=False).to(device)
     model.eval()
 
     # 执行测试（输出文件夹设为模型所在目录）
