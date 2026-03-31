@@ -106,8 +106,10 @@ class SparsemaxFunction(Function):
         """
         x.to(device)
         batch.to(device)
-        max_val, _ = scatter_max(x.cpu(), batch.cpu())
-        max_val = max_val.to(device=x.device)
+        # max_val, _ = scatter_max(x.cpu(), batch.cpu())
+        # max_val = max_val.to(device=x.device)
+
+        max_val, _ = scatter_max(x, batch) # 只要 torch_scatter 正常安装在 GPU 环境，完全可以直接算
         x -= max_val[batch]
         tau, supp_size = _threshold_and_support(x, batch)
         output = torch.clamp(x - tau[batch], min=0)

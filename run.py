@@ -4,7 +4,6 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -26,7 +25,7 @@ def setup_logging(output_root, timestamp=None):
         log_file: 日志文件路径
     """
     if timestamp is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     log_dir = os.path.join(output_root, "train_log")
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "{}.log".format(timestamp))
@@ -309,7 +308,7 @@ def main():
     args = parse_args()
     os.makedirs(args.output_root, exist_ok=True)
     # 先生成 timestamp，确保所有路径使用同一时间戳
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     # 初始化日志，使用已有的 timestamp，并使用追加模式
     _, log_file = setup_logging(args.output_root, timestamp)
     args.sc_kinds_resolved = args.sc_kinds if args.sc_kinds is not None else [x.strip() for x in str(args.sc_kind).split(",") if x.strip()]
@@ -366,6 +365,12 @@ def main():
             create_val=True,
         )
         trainloader = dt.train_dataloader(batchsize=args.batch)
+        # 在生成 DataLoader 之后获取：
+        train_labels = torch.tensor([data[1] for data in dt.train_dataset], dtype=torch.float64)
+        lb_mean = train_labels.mean().to(device)
+        lb_std = train_labels.std().to(device)
+        print(f"Label Normalization: mean={lb_mean.item():.4f}, std={lb_std.item():.4f}")
+        
         testloader = dt.test_dataloader()
         valloader = dt.val_dataloader()
         print("dataset is okay for label: {}".format(label))
