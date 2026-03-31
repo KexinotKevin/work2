@@ -62,6 +62,14 @@ def _resolve_conn_file(base_path):
     return None
 
 
+def _torch_load_graph_cache(path):
+    """Load PyG Data dict; PyTorch>=2.4 defaults weights_only=True which breaks PyG objects."""
+    try:
+        return torch.load(path, weights_only=False)
+    except TypeError:
+        return torch.load(path)
+
+
 def load_data(
     netDir,
     subjlist,
@@ -82,81 +90,105 @@ def load_data(
         fc_fod = netname[1]
         sc_netnames = [sc_fod]
         fc_netname = fc_fod
+
+    # ==================== 【核心新增 1：初始化磁盘缓存机制】 ====================
+    atlas_tag = atlas_name if atlas_name else "default"
+    sc_tag = "-".join(sc_netnames)
+    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}.pt".replace("/", "_")
+    cache_path = osp.join(netDir, cache_filename)
+
+    graph_dict = {}
+    if osp.exists(cache_path):
+        print(f">>> Loading cached graph structures from {cache_path} (Super Fast!)...")
+        graph_dict = _torch_load_graph_cache(cache_path)
+    else:
+        print(">>> No cache found. Parsing massive raw CSVs (This will only happen ONCE)...")
+    new_graphs_processed = False
+    # =========================================================================
+
     sc_channel_count = len(sc_netnames)
     graph_list = []
     dt = pd.read_csv(labelfile)
     lb_map = dt[labeltype].values
     subjlist_set = set([str(s) for s in subjlist if str(s)])
 
-    cnt=0
     for k in range(dt.shape[0]):
         subj = str(dt[subject_col][k])
         if subj in subjlist_set:
-            if use_cfg_layout:
-                if not atlas_name:
-                    raise ValueError("atlas_name is required when use_cfg_layout=True.")
-                sc_mats = []
-                missing_sc = False
-                for sc_name in sc_netnames:
-                    sc_base = osp.join(netDir, atlas_name, subj, "SC", sc_name)
-                    sc_path = _resolve_conn_file(sc_base)
-                    if sc_path is None:
-                        missing_sc = True
-                        break
-                    sc_mats.append(load_connectivity_matrix(sc_path, isheader=True))
-
-                fc_base = osp.join(netDir, atlas_name, subj, "FC", fc_netname)
-                fc_path = _resolve_conn_file(fc_base)
-                if missing_sc or fc_path is None:
-                    continue
-                fc_mat = load_connectivity_matrix(fc_path, isheader=True)
+            
+            # ==================== 【核心新增 2：命中缓存则跳过 CSV 解析】 ====================
+            if subj in graph_dict:
+                g_data = graph_dict[subj]
             else:
-                matname = '{}.csv'.format(subj)
-                sc_mat = load_connectivity_matrix(osp.join(netDir, sc_netnames[0], matname))
-                sc_mats = [sc_mat]
-                fc_mat = load_connectivity_matrix(osp.join(netDir, fc_netname, matname), isheader=Isheader)
-            # G = nx.MultiGraph()
-            feat = torch.tensor(get_node_feature(len(fc_mat[0])))
-            edge_in = []
-            edge_out = []
-            edge_attr_l = []
+                # ------ 下面完全是你原封不动的 CSV 解析和图构建逻辑 ------
+                if use_cfg_layout:
+                    if not atlas_name:
+                        raise ValueError("atlas_name is required when use_cfg_layout=True.")
+                    sc_mats = []
+                    missing_sc = False
+                    for sc_name in sc_netnames:
+                        sc_base = osp.join(netDir, atlas_name, subj, "SC", sc_name)
+                        sc_path = _resolve_conn_file(sc_base)
+                        if sc_path is None:
+                            missing_sc = True
+                            break
+                        sc_mats.append(load_connectivity_matrix(sc_path, isheader=True))
 
-            # encoded_lb_map = label_encoding(dt[labeltype].values, dim=labeldim)
+                    fc_base = osp.join(netDir, atlas_name, subj, "FC", fc_netname)
+                    fc_path = _resolve_conn_file(fc_base)
+                    if missing_sc or fc_path is None:
+                        continue
+                    fc_mat = load_connectivity_matrix(fc_path, isheader=True)
+                else:
+                    matname = '{}.csv'.format(subj)
+                    sc_mat = load_connectivity_matrix(osp.join(netDir, sc_netnames[0], matname))
+                    sc_mats = [sc_mat]
+                    fc_mat = load_connectivity_matrix(osp.join(netDir, fc_netname, matname), isheader=Isheader)
+                
+                feat = torch.tensor(get_node_feature(len(fc_mat[0])))
+                edge_in = []
+                edge_out = []
+                edge_attr_l = []
 
-            for i in range(len(fc_mat[0])):
-                # G.add_node(i)
-                # G.nodes[i]['feature'] = feat[i, :]
-                for j in range(i, len(fc_mat[0])):
-                    edge_in.append(i)
-                    # edge_in.append(j)
-                    edge_out.append(j)
-                    # edge_out.append(i)
-                    edge_attr = []
-                    for sc_mat_item in sc_mats:
-                        edge_attr.append(sc_mat_item[i][j] if i != j else 0)
-                    edge_attr.append(fc_mat[i][j] if fc_mat[i][j]>0 else 0)
-                    edge_attr.append(abs(fc_mat[i][j]) if fc_mat[i][j]<0 else 0)
-                    # G.add_edges_from([(i, j, {"sc": np.log(1+sc_mat[i][j])/(1+np.log(1+sc_mat[i][j]))}),
-                    #                   (i, j, {"fc_pos": fc_mat[i][j] if fc_mat[i][j]>0 else 0}),
-                    #                   (i, j, {"fc_neg": abs(fc_mat[i][j]) if fc_mat[i][j]<0 else 0})])
-                    # for k in range(2):
-                    edge_attr_l.append(edge_attr)
-            edge_attr = torch.tensor(edge_attr_l, dtype=feat.dtype, device=feat.device)
-            # normalization
-            for i in range(len(edge_attr_l[0])):
-                denom = torch.sum(edge_attr[:, i])
-                if denom > 0:
-                    edge_attr[:, i] = edge_attr[:, i] / denom
-            g_data = D.Data()
-            g_data.x, g_data.edge_index, g_data.edge_attr = feat, torch.tensor([edge_in, edge_out]), edge_attr
-            # lb = encoded_lb_map[dt[dt['Subject'] == subj].index[0], :]
-            lb = torch.tensor(lb_map[k], dtype=feat.dtype, device=feat.device)
+                for i in range(len(fc_mat[0])):
+                    for j in range(i, len(fc_mat[0])):
+                        edge_in.append(i)
+                        edge_out.append(j)
+                        edge_attr = []
+                        for sc_mat_item in sc_mats:
+                            edge_attr.append(sc_mat_item[i][j] if i != j else 0)
+                        edge_attr.append(fc_mat[i][j] if fc_mat[i][j]>0 else 0)
+                        edge_attr.append(abs(fc_mat[i][j]) if fc_mat[i][j]<0 else 0)
+                        edge_attr_l.append(edge_attr)
+                edge_attr = torch.tensor(edge_attr_l, dtype=feat.dtype, device=feat.device)
+                
+                # normalization
+                for i in range(len(edge_attr_l[0])):
+                    denom = torch.sum(edge_attr[:, i])
+                    if denom > 0:
+                        edge_attr[:, i] = edge_attr[:, i] / denom
+                
+                g_data = D.Data()
+                g_data.x, g_data.edge_index, g_data.edge_attr = feat, torch.tensor([edge_in, edge_out]), edge_attr
+                # ------ 原有 CSV 解析逻辑结束 ------
+                
+                # 将处理好的纯结构图存入字典
+                graph_dict[subj] = g_data
+                new_graphs_processed = True
+            # =========================================================================
+
+            # 【动态分配当前任务的 Label】（无论来自缓存还是刚处理完，都在这里挂载标签）
+            lb = torch.tensor(lb_map[k], dtype=g_data.x.dtype, device=g_data.x.device)
             if ifBucket:
                 graph_list.append((g_data, torch.Tensor(label_bucketization(lb))))
             else:
                 graph_list.append((g_data, lb))
-        # cnt+=1
-        # if cnt==50:
-        #     break
+
+    # ==================== 【核心新增 3：将新生成的图字典落盘】 ====================
+    if new_graphs_processed:
+        print(f">>> Saving processed graph caches to {cache_path} ...")
+        torch.save(graph_dict, cache_path)
+    # =========================================================================
+
     print("dataset size: {} subjects".format(len(graph_list)))
     return graph_list

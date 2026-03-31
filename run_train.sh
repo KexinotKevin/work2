@@ -2,7 +2,7 @@
 
 # conda activate gnn_work2
 python run.py --use_dataset_cfg \
-    --num_epochs 1 \
+    --num_epochs 3 \
     --dataset_name S1200 \
     --atlas_name bna246 \
     --sc_kinds FA fiber_count \

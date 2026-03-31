@@ -177,15 +177,25 @@ def plot_saliency_results(saliency_matrices, coords, out_dir, label_name):
         zero_mask = (rel_saliency == 0)
         
         # 1. 绘制特定关系维度的显著性热力图 (Heatmap)
-        plt.figure(figsize=(10, 8))
-        sns.heatmap(rel_saliency, cmap="Reds", square=True, mask=zero_mask)
-        plt.title(f"Average Saliency Map: {label_name} ({rel_name})")
-        plt.tight_layout()
+        non_zero_mask = (rel_saliency != 0)
+        if non_zero_mask.sum() == 0:
+            print(f"Warning: All-zero saliency data for {label_name} ({rel_name}), skipping heatmap.")
+        else:
+            # 计算有效的 vmin/vmax，避免 All-NaN slice 警告
+            valid_data = rel_saliency[non_zero_mask]
+            vmin, vmax = np.nanmin(valid_data), np.nanmax(valid_data)
+            if vmin == vmax:
+                vmin, vmax = 0, 1  # 避免单一值导致的除零问题
+            
+            plt.figure(figsize=(10, 8))
+            sns.heatmap(rel_saliency, cmap="Reds", square=True, mask=zero_mask, vmin=vmin, vmax=vmax)
+            plt.title(f"Average Saliency Map: {label_name} ({rel_name})")
+            plt.tight_layout()
 
-        true_out_dir = os.path.join(out_dir, label_name)
-        os.makedirs(true_out_dir, exist_ok=True)
-        plt.savefig(os.path.join(true_out_dir, f"saliency_heatmap_{label_name}_{rel_name}.pdf"), dpi=300)
-        plt.close()
+            true_out_dir = os.path.join(out_dir, label_name)
+            os.makedirs(true_out_dir, exist_ok=True)
+            plt.savefig(os.path.join(true_out_dir, f"saliency_heatmap_{label_name}_{rel_name}.pdf"), dpi=300)
+            plt.close()
 
         # 2. 绘制特定关系维度的大脑 3D 连接图 (Connectome)
         non_zero_saliency = rel_saliency[rel_saliency > 0]
