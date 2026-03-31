@@ -205,9 +205,13 @@ def explain_model(args, testloader, device, label_output_dir):
     ).to(device)
     model_t.eval()
 
+    # 强制 batch_size=1，避免 PyG DataLoader 拼接多图导致节点 ID 偏移
+    from torch_geometric.loader import DataLoader
+    expl_loader = DataLoader(testloader.dataset, batch_size=1, shuffle=False)
+
     all_sal_matrices = []
 
-    for g_test, lb_test in testloader:
+    for g_test, lb_test in expl_loader:
         g_test, lb_test = g_test.to(device), lb_test.to(device)
 
         # 允许计算关于输入边属性的梯度

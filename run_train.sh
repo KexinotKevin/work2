@@ -1,6 +1,6 @@
 #!/bin/bash
 
-conda activate gnn_work2
+# conda activate gnn_work2
 python run.py --use_dataset_cfg \
     --num_epochs 1 \
     --dataset_name S1200 \

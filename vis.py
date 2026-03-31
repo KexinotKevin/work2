@@ -173,12 +173,18 @@ def plot_saliency_results(saliency_matrices, coords, out_dir, label_name):
         rel_saliency = mean_saliency[:, :, r] if num_relations > 1 else mean_saliency
         rel_name = rel_names[r]
         
+        # 创建掩码，屏蔽背景 0 值，让显著性值更好地显示
+        zero_mask = (rel_saliency == 0)
+        
         # 1. 绘制特定关系维度的显著性热力图 (Heatmap)
         plt.figure(figsize=(10, 8))
-        sns.heatmap(rel_saliency, cmap="Reds", square=True)
+        sns.heatmap(rel_saliency, cmap="Reds", square=True, mask=zero_mask)
         plt.title(f"Average Saliency Map: {label_name} ({rel_name})")
         plt.tight_layout()
-        plt.savefig(os.path.join(out_dir, f"saliency_heatmap_{label_name}_{rel_name}.pdf"), dpi=300)
+
+        true_out_dir = os.path.join(out_dir, label_name)
+        os.makedirs(true_out_dir, exist_ok=True)
+        plt.savefig(os.path.join(true_out_dir, f"saliency_heatmap_{label_name}_{rel_name}.pdf"), dpi=300)
         plt.close()
 
         # 2. 绘制特定关系维度的大脑 3D 连接图 (Connectome)
@@ -191,7 +197,7 @@ def plot_saliency_results(saliency_matrices, coords, out_dir, label_name):
                 plot_connectome(rel_saliency, coords, edge_threshold=threshold, 
                                 title=f"Top Saliency Connectome: {label_name} ({rel_name})",
                                 figure=fig, node_size=20, edge_kwargs={'lw': 2})
-                fig.savefig(os.path.join(out_dir, f"saliency_connectome_{label_name}_{rel_name}.pdf"), dpi=300)
+                fig.savefig(os.path.join(true_out_dir, f"saliency_connectome_{label_name}_{rel_name}.pdf"), dpi=300)
                 plt.close()
             else:
                 print(f"Warning: Connectome plot skipped for {label_name} ({rel_name}). Coordinates mismatch.")
