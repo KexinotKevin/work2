@@ -116,20 +116,42 @@ def plot_interpretability(combo_dir, out_dir, coords, label_filter=None):
         if label_filter and display_label not in label_filter:
             continue
         
-        sal_file = os.path.join(label_dir, "saliency_maps.npy")
+        sal_file = os.path.join(label_dir, "saliency_matrices.npy")
         idx_file = os.path.join(label_dir, "edge_indices.npy")
+        old_sal_file = os.path.join(label_dir, "saliency_maps.npy")
         
-        if os.path.isfile(sal_file) and os.path.isfile(idx_file):
+        # 检查新格式：已经是完整邻接矩阵 (samples, nodes, nodes, relations)
+        if os.path.isfile(sal_file):
             print(f"Plotting Saliency Maps for {display_label}...")
             saliency_data = np.load(sal_file, allow_pickle=True)
+            
+            # 判断是否为已经构建好的矩阵格式 (4D)
+            if len(saliency_data.shape) == 4 and saliency_data.shape[2] == saliency_data.shape[1]:
+                # 新格式：直接使用
+                sal_matrices = [saliency_data[i] for i in range(len(saliency_data))]
+            else:
+                # 旧格式：需要 edge_indices 构建
+                if not os.path.isfile(idx_file):
+                    print(f"Warning: edge_indices.npy not found for {display_label}, skipping...")
+                    continue
+                edge_indices = np.load(idx_file, allow_pickle=True)
+                sal_matrices = []
+                for e_idx, s_attr in zip(edge_indices, saliency_data):
+                    sal_matrices.append(build_saliency_matrix(e_idx, s_attr))
+            
+            # 调用 vis.py 进行画图
+            plot_saliency_results(sal_matrices, coords, out_dir, display_label)
+        
+        # 兼容旧格式
+        elif os.path.isfile(old_sal_file) and os.path.isfile(idx_file):
+            print(f"Plotting Saliency Maps for {display_label}...")
+            saliency_data = np.load(old_sal_file, allow_pickle=True)
             edge_indices = np.load(idx_file, allow_pickle=True)
             
-            # 将每个样本转为动态大小的邻接矩阵
             sal_matrices = []
             for e_idx, s_attr in zip(edge_indices, saliency_data):
                 sal_matrices.append(build_saliency_matrix(e_idx, s_attr))
             
-            # 调用 vis.py 进行画图
             plot_saliency_results(sal_matrices, coords, out_dir, display_label)
 
 

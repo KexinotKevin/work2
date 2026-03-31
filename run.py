@@ -15,9 +15,18 @@ from dataset import dataset
 from model_r import LGUNet_rela
 
 
-def setup_logging(output_root):
-    """设置日志文件，记录终端输出"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def setup_logging(output_root, timestamp=None):
+    """设置日志文件，记录终端输出
+    
+    Args:
+        output_root: 输出根目录
+        timestamp: 如果提供，则使用该时间戳创建日志；否则生成新的
+    Returns:
+        timestamp: 使用的时间戳
+        log_file: 日志文件路径
+    """
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join(output_root, "train_log")
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "{}.log".format(timestamp))
@@ -25,7 +34,7 @@ def setup_logging(output_root):
     class Logger:
         def __init__(self, filename):
             self.terminal = sys.stdout
-            self.log = open(filename, "w", encoding="utf-8")
+            self.log = open(filename, "a", encoding="utf-8")
         
         def write(self, message):
             self.terminal.write(message)
@@ -37,7 +46,7 @@ def setup_logging(output_root):
     
     sys.stdout = Logger(log_file)
     sys.stderr = sys.stdout
-    return timestamp
+    return timestamp, log_file
 
 
 def remove_pattern(pattern):
@@ -196,9 +205,7 @@ def explain_model(args, testloader, device, label_output_dir):
     ).to(device)
     model_t.eval()
 
-    all_saliency = []
-    all_survival = []
-    all_edge_indices = []  # 【新增】初始化存放边索引的列表
+    all_sal_matrices = []
 
     for g_test, lb_test in testloader:
         g_test, lb_test = g_test.to(device), lb_test.to(device)
@@ -210,22 +217,38 @@ def explain_model(args, testloader, device, label_output_dir):
         loss = torch.abs(lb_pred - lb_test).mean()
         loss.backward()
 
-        # 提取显著性图
-        saliency = g_test.edge_attr.grad.abs().cpu().numpy()
-        all_saliency.append(saliency)
+        # 【核心改进 1】: 采用 Input * Gradient (类似 EdgeSHAPer 的特征贡献度近似)
+        # 捕捉该边在当前数值下对预测结果的真实贡献大小
+        saliency = (g_test.edge_attr.grad * g_test.edge_attr).abs().detach().cpu().numpy()
+        e_idx = g_test.edge_index.detach().cpu().numpy()
 
-        # 提取生存图
-        survival = model_t.saved_edge_weights[-1].detach().cpu().numpy()
-        all_survival.append(survival)
+        num_nodes = int(np.max(e_idx)) + 1
+        num_relations = saliency.shape[1] if len(saliency.shape) > 1 else 1
         
-        # 【新增】保存当前图的边索引
-        all_edge_indices.append(g_test.edge_index.cpu().numpy())
+        # 将邻接矩阵扩展为 3D: (num_nodes, num_nodes, num_relations)
+        sal_mat = np.zeros((num_nodes, num_nodes, num_relations))
+        
+        # 【核心改进 2】: 针对每一种类型的边（SC/FC）进行独立的 Min-Max 归一化
+        for r in range(num_relations):
+            sal_r = saliency[:, r] if num_relations > 1 else saliency
+            
+            # 独立归一化到 [0, 1]，消除不同网络属性的量纲壁垒
+            max_val, min_val = sal_r.max(), sal_r.min()
+            if max_val > min_val:
+                sal_r_norm = (sal_r - min_val) / (max_val - min_val)
+            else:
+                sal_r_norm = np.zeros_like(sal_r)
+            
+            # 填入对应关系通道的矩阵
+            for k in range(e_idx.shape[1]):
+                i, j = int(e_idx[0, k]), int(e_idx[1, k])
+                sal_mat[i, j, r] = sal_r_norm[k]
+                sal_mat[j, i, r] = sal_r_norm[k]
+                
+        all_sal_matrices.append(sal_mat)
 
     # 存盘
-    np.save(os.path.join(label_output_dir, "saliency_maps.npy"), np.array(all_saliency, dtype=object))
-    np.save(os.path.join(label_output_dir, "survival_weights.npy"), np.array(all_survival, dtype=object))
-    # 【新增】存盘边索引
-    np.save(os.path.join(label_output_dir, "edge_indices.npy"), np.array(all_edge_indices, dtype=object))
+    np.save(os.path.join(label_output_dir, "saliency_matrices.npy"), np.array(all_sal_matrices))
     print(f"Interpretability evidence saved to {label_output_dir}")
 
 
@@ -264,7 +287,10 @@ def parse_args():
 def main():
     args = parse_args()
     os.makedirs(args.output_root, exist_ok=True)
-    timestamp = setup_logging(args.output_root)
+    # 先生成 timestamp，确保所有路径使用同一时间戳
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # 初始化日志，使用已有的 timestamp，并使用追加模式
+    _, log_file = setup_logging(args.output_root, timestamp)
     args.sc_kinds_resolved = args.sc_kinds if args.sc_kinds is not None else [x.strip() for x in str(args.sc_kind).split(",") if x.strip()]
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
