@@ -81,6 +81,9 @@ class dataset():
             if len(tgt_cols) < 4:
                 raise ValueError(f"dataset cfg invalid for {self.dataset_name}.")
             self.subject_col = tgt_cols[0]
+            # 提取性别和年龄列（用于 GRL 对抗训练）
+            self.gender_col = tgt_cols[1] if len(tgt_cols) > 1 else None
+            self.age_col = tgt_cols[2] if len(tgt_cols) > 2 else None
             self.sc_netnames = [
                 resolve_kind_filename(SC_KIND, item) for item in self.sc_kinds
             ]
@@ -136,7 +139,9 @@ class dataset():
                                   fc_netname=self.fc_netname,
                                   subject_col=self.subject_col,
                                   use_cfg_layout=self.use_cfg_layout,
-                                  atlas_name=self.atlas_name)
+                                  atlas_name=self.atlas_name,
+                                  gender_col=self.gender_col,
+                                  age_col=self.age_col)
         
         train_size = int(split_ratio[0] * len(self.datalist))
         # print(train_size)

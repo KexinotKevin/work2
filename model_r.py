@@ -6,6 +6,18 @@ from torch_geometric.nn import GCNConv,global_mean_pool
 from layers import LGMVPool, GCN, relationGCN
 from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 
+
+class GradientReversalLayer(torch.autograd.Function):
+    """梯度反转层：前向传播恒等映射，反向传播时反转梯度方向"""
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.alpha, None
+
 class LGUNet_rela(torch.nn.Module):
     def __init__(self, args, sum_res=False, act=F.relu):
         super(LGUNet_rela, self).__init__()
@@ -23,6 +35,21 @@ class LGUNet_rela(torch.nn.Module):
         self.lin1 = torch.nn.Linear(self.hidden_channels*2, self.hidden_channels)
         self.lin2 = torch.nn.Linear(self.hidden_channels, self.hidden_channels // 2)
         self.lin3 = torch.nn.Linear(self.hidden_channels // 2, 1)
+
+        # GRL 对抗分支：年龄预测器
+        self.age_predictor = nn.Sequential(
+            nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+            nn.ReLU(),
+            nn.Dropout(p=self.drop),
+            nn.Linear(self.hidden_channels, 1)
+        )
+        # GRL 对抗分支：性别分类器
+        self.gender_predictor = nn.Sequential(
+            nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+            nn.ReLU(),
+            nn.Dropout(p=self.drop),
+            nn.Linear(self.hidden_channels, 1)
+        )
 
         channels = self.hidden_channels
 
@@ -78,11 +105,17 @@ class LGUNet_rela(torch.nn.Module):
             x_cl.append(F.relu(glob_x))
         x_cl = sum(x_cl)
 
-        # out = torch.tensor(x_cl.view(x_cl.size(0)//self.in_channels, -1), dtype=torch.float64)
-        out = F.relu(self.lin1(x_cl))
-        out = F.dropout(out, p=self.drop, training=self.training)
-        out = F.relu(self.lin2(out))
-        out = F.dropout(out, p=self.drop, training=self.training)
-        out = self.lin3(out)
+        # 主任务：认知能力预测
+        out_cog = F.relu(self.lin1(x_cl))
+        out_cog = F.dropout(out_cog, p=self.drop, training=self.training)
+        out_cog = F.relu(self.lin2(out_cog))
+        out_cog = F.dropout(out_cog, p=self.drop, training=self.training)
+        out_cog = self.lin3(out_cog)
+
+        # 对抗任务：年龄与性别预测（通过 GRL 反转梯度）
+        x_reversed = GradientReversalLayer.apply(x_cl, 1.0)
+        out_age = self.age_predictor(x_reversed)
+        out_gender = self.gender_predictor(x_reversed)
+
         self.saved_edge_weights = edge_weights
-        return out
+        return out_cog, out_age, out_gender

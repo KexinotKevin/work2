@@ -84,7 +84,28 @@ def load_data(
     subject_col="Subject",
     use_cfg_layout=False,
     atlas_name=None,
+    gender_col=None,
+    age_col=None,
 ):
+    def process_age(val):
+        """处理异质性年龄格式：S1200区间型、ABCD整型、HCD连续型"""
+        s = str(val).strip()
+        try:
+            if '-' in s:
+                low, high = s.split('-')
+                return (float(low) + float(high)) / 2.0
+            if '+' in s:
+                return float(s.replace('+', '')) + 1.0
+            return float(s)
+        except (ValueError, TypeError):
+            return 0.0
+
+    def process_gender(val):
+        """处理异质性性别格式：统一映射为 0(Female) 或 1(Male)"""
+        s = str(val).upper().strip()
+        if s in ['M', 'MALE', '1', '1.0', 'MALE/M']:
+            return 1.0
+        return 0.0
     if sc_netnames is None or fc_netname is None:
         sc_fod = netname[0]
         fc_fod = netname[1]
@@ -112,13 +133,28 @@ def load_data(
     lb_map = dt[labeltype].values
     subjlist_set = set([str(s) for s in subjlist if str(s)])
 
+    # 预处理年龄与性别映射（用于 GRL 对抗训练）
+    age_map = {}
+    gender_map = {}
+    if age_col and age_col in dt.columns:
+        for _, row in dt.iterrows():
+            subj = str(row[subject_col])
+            age_map[subj] = process_age(row[age_col])
+    if gender_col and gender_col in dt.columns:
+        for _, row in dt.iterrows():
+            subj = str(row[subject_col])
+            gender_map[subj] = process_gender(row[gender_col])
+
     for k in range(dt.shape[0]):
         subj = str(dt[subject_col][k])
         if subj in subjlist_set:
-            
+
             # ==================== 【核心新增 2：命中缓存则跳过 CSV 解析】 ====================
             if subj in graph_dict:
                 g_data = graph_dict[subj]
+                # 为缓存数据挂载协变量（确保 GRL 分支正常工作）
+                g_data.age = torch.tensor([age_map.get(subj, 0.0)], dtype=g_data.x.dtype)
+                g_data.gender = torch.tensor([gender_map.get(subj, 0.0)], dtype=g_data.x.dtype)
             else:
                 # ------ 下面完全是你原封不动的 CSV 解析和图构建逻辑 ------
                 if use_cfg_layout:
@@ -170,6 +206,9 @@ def load_data(
                 
                 g_data = D.Data()
                 g_data.x, g_data.edge_index, g_data.edge_attr = feat, torch.tensor([edge_in, edge_out]), edge_attr
+                # 挂载人口学协变量（供 GRL 对抗分支使用）
+                g_data.age = torch.tensor([age_map.get(subj, 0.0)], dtype=feat.dtype)
+                g_data.gender = torch.tensor([gender_map.get(subj, 0.0)], dtype=feat.dtype)
                 # ------ 原有 CSV 解析逻辑结束 ------
                 
                 # 将处理好的纯结构图存入字典

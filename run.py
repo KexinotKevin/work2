@@ -100,10 +100,22 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             g_data = g_data.to(device)
             lb_data = lb_data.to(device)
             optimizer.zero_grad()
-            lb_pred = model(g_data, lb_data, g_data.batch).squeeze(-1)
-            loss = F.smooth_l1_loss(lb_pred, lb_data)
+
+            # 前向传播：主任务 + GRL 对抗任务
+            out_cog, out_age, out_gender = model(g_data, lb_data, g_data.batch)
+
+            # 主任务损失：认知能力预测
+            loss_cog = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data)
+
+            # 对抗任务损失：年龄回归 + 性别分类
+            loss_age = F.smooth_l1_loss(out_age.squeeze(-1), g_data.age.squeeze(-1).to(device))
+            loss_gender = F.binary_cross_entropy_with_logits(out_gender.squeeze(-1), g_data.gender.squeeze(-1).to(device))
+
+            # 复合损失：主任务 + 对抗任务（强制特征提取器学习混淆不变表征）
+            loss = loss_cog + loss_age + loss_gender
+
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0) # 新增梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
             optimizer.step()
             train_loss_tmp.append(loss.item())
         scheduler.step()
@@ -115,8 +127,9 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             for g_data, lb_data in valloader:
                 g_data = g_data.to(device)
                 lb_data = lb_data.to(device)
-                lb_pred = model(g_data, lb_data, g_data.batch).squeeze(-1)
-                loss = F.smooth_l1_loss(lb_pred, lb_data)
+                # 验证时仅使用主任务输出（忽略对抗分支）
+                out_cog, _, _ = model(g_data, lb_data, g_data.batch)
+                loss = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data)
                 val_loss_tmp.append(loss.item())
         val_loss_v = sum(val_loss_tmp) / len(val_loss_tmp)
 
@@ -169,7 +182,8 @@ def evaluate(args, testloader, device, label_output_dir):
             for g_test, lb_test in testloader:
                 g_test = g_test.to(device)
                 lb_test = lb_test.to(device)
-                lb_pred = model_t(g_test, lb_test, g_test.batch).squeeze(-1)
+                # 评估时仅使用主任务输出
+                lb_pred, _, _ = model_t(g_test, lb_test, g_test.batch)
                 lb_t.append(lb_test.cpu().numpy())
                 lb_p.append(lb_pred.cpu().numpy())
             
@@ -218,8 +232,9 @@ def explain_model(args, testloader, device, label_output_dir):
         # 允许计算关于输入边属性的梯度
         g_test.edge_attr.requires_grad = True
 
-        lb_pred = model_t(g_test, lb_test, g_test.batch).squeeze(-1)
-        loss = torch.abs(lb_pred - lb_test).mean()
+        # 可解释性分析仅使用主任务输出
+        lb_pred, _, _ = model_t(g_test, lb_test, g_test.batch)
+        loss = torch.abs(lb_pred.squeeze(-1) - lb_test).mean()
         loss.backward()
 
         # 【核心改进 1】: 采用 Input * Gradient (类似 EdgeSHAPer 的特征贡献度近似)
