@@ -148,6 +148,8 @@ def load_data(
     for k in range(dt.shape[0]):
         subj = str(dt[subject_col][k])
         if subj in subjlist_set:
+            # ABCD dataset: labelfile 中是 NDAR_XXXXX，但 netDir 里是 NDARXXXXX
+            subj_for_file = subj.replace("NDAR_", "NDAR") if subj.startswith("NDAR_") else subj
 
             # ==================== 【核心新增 2：命中缓存则跳过 CSV 解析】 ====================
             if subj in graph_dict:
@@ -163,20 +165,20 @@ def load_data(
                     sc_mats = []
                     missing_sc = False
                     for sc_name in sc_netnames:
-                        sc_base = osp.join(netDir, atlas_name, subj, "SC", sc_name)
+                        sc_base = osp.join(netDir, atlas_name, subj_for_file, "SC", sc_name)
                         sc_path = _resolve_conn_file(sc_base)
                         if sc_path is None:
                             missing_sc = True
                             break
                         sc_mats.append(load_connectivity_matrix(sc_path, isheader=True))
 
-                    fc_base = osp.join(netDir, atlas_name, subj, "FC", fc_netname)
+                    fc_base = osp.join(netDir, atlas_name, subj_for_file, "FC", fc_netname)
                     fc_path = _resolve_conn_file(fc_base)
                     if missing_sc or fc_path is None:
                         continue
                     fc_mat = load_connectivity_matrix(fc_path, isheader=True)
                 else:
-                    matname = '{}.csv'.format(subj)
+                    matname = '{}.csv'.format(subj_for_file)
                     sc_mat = load_connectivity_matrix(osp.join(netDir, sc_netnames[0], matname))
                     sc_mats = [sc_mat]
                     fc_mat = load_connectivity_matrix(osp.join(netDir, fc_netname, matname), isheader=Isheader)

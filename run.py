@@ -110,17 +110,26 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             # 主任務損失：讓模型去擬合標準化後的標籤
             loss_cog = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data_norm)
 
-            # 對抗任務損失：年齡回歸 + 性別分類 (保持不變)
-            loss_age = F.smooth_l1_loss(out_age.squeeze(-1), g_data.age.squeeze(-1).to(device))
+            # ====== 【修復 1：粗略歸一化年齡標籤，防止 GRL 梯度爆炸】 ======
+            # 將數值除以 100 壓縮到 0~1 附近，使其梯度量級與 loss_cog 對齊
+            age_labels = g_data.age.squeeze(-1).to(device) / 100.0
+            out_age_scaled = out_age.squeeze(-1) / 100.0
+            loss_age = F.smooth_l1_loss(out_age_scaled, age_labels)
+            
             loss_gender = F.binary_cross_entropy_with_logits(out_gender.squeeze(-1), g_data.gender.squeeze(-1).to(device))
 
-            # 複合損失：主任務 + 對抗任務
-            loss = loss_cog + loss_age + loss_gender
+            # ====== 【修復 2：增加對抗任務權重，防止喧賓奪主】 ======
+            # GRL 是一種強正則化，權重 (adv_weight) 通常設為 0.01 ~ 0.1 之間
+            adv_weight = 0.05 
+            loss = loss_cog + adv_weight * (loss_age + loss_gender)
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
             optimizer.step()
-            train_loss_tmp.append(loss.item())
+            
+            # ====== 【修復 3：統一量綱】 ======
+            # 訓練日誌只記錄主任務 loss_cog，使其與 loss_val 完全具備可比性
+            train_loss_tmp.append(loss_cog.item())
         scheduler.step()
         train_loss_v = sum(train_loss_tmp) / len(train_loss_tmp)
 
@@ -298,7 +307,7 @@ def parse_args():
     parser.add_argument("--input_dimension", type=int, default=246)
     parser.add_argument("--hidden_dimension", type=int, default=246)
     parser.add_argument("--output_dimension", type=int, default=1)
-    parser.add_argument("--depth", type=float, default=3)
+    parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--pool_ratio", type=float, nargs="+", default=[0.5, 0.8, 0.5])
 
