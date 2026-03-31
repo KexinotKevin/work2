@@ -152,62 +152,121 @@ def build_saliency_matrix(edge_index, saliency_attr, num_nodes=None):
     return sal_mat
 
 
-def plot_saliency_results(saliency_matrices, coords, out_dir, label_name):
-    """绘制各关系维度的平均显著性热力图和Top-K大脑连接图"""
+def plot_saliency_heatmaps(saliency_matrices, out_dir, label_name, sc_kinds=None, fc_kind=None):
+    """绘制所有关系维度的显著性热力图，合并到一个PDF中
+    
+    布局：2x2网格
+    第一行：relation 0 (FA) 和 relation 1 (fiber_count)
+    第二行：relation 2 (fc_kind_pos) 和 relation 3 (fc_kind_neg)
+    """
     import os
     import numpy as np
     import matplotlib.pyplot as plt
     import seaborn as sns
-    from nilearn.plotting import plot_connectome
 
-    # saliency_matrices 现在的 shape 是 (samples, num_nodes, num_nodes, num_relations)
-    mean_saliency = np.mean(saliency_matrices, axis=0) 
-    
-    # 兼容单关系和多关系
+    mean_saliency = np.mean(saliency_matrices, axis=0)
     num_relations = mean_saliency.shape[-1] if len(mean_saliency.shape) == 3 else 1
     
-    # 你可以根据实际情况修改这里的别名，比如 ['SC', 'FC_Rest', 'FC_Task']
-    rel_names = [f"Relation_{r}" for r in range(num_relations)] 
-
-    for r in range(num_relations):
+    if num_relations < 4:
+        raise ValueError(f"Expected at least 4 relations, got {num_relations}")
+    
+    if sc_kinds is None:
+        sc_kinds = ['FA', 'fiber_count']
+    if fc_kind is None:
+        fc_kind = 'pcc_rest'
+    
+    rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
+                 sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
+                 f'{fc_kind}_pos',
+                 f'{fc_kind}_neg']
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle(f'Saliency Heatmaps: {label_name}', fontsize=16, fontweight='bold', y=1.02)
+    
+    for r in range(4):
+        row = r // 2
+        col = r % 2
+        
         rel_saliency = mean_saliency[:, :, r] if num_relations > 1 else mean_saliency
         rel_name = rel_names[r]
         
-        # 创建掩码，屏蔽背景 0 值，让显著性值更好地显示
-        zero_mask = (rel_saliency == 0)
-        
-        # 1. 绘制特定关系维度的显著性热力图 (Heatmap)
+        ax = axes[row, col]
         non_zero_mask = (rel_saliency != 0)
         if non_zero_mask.sum() == 0:
-            print(f"Warning: All-zero saliency data for {label_name} ({rel_name}), skipping heatmap.")
+            ax.text(0.5, 0.5, f'{rel_name}\n(All zeros)', ha='center', va='center', fontsize=12)
         else:
-            # 计算有效的 vmin/vmax，避免 All-NaN slice 警告
             valid_data = rel_saliency[non_zero_mask]
             vmin, vmax = np.nanmin(valid_data), np.nanmax(valid_data)
             if vmin == vmax:
-                vmin, vmax = 0, 1  # 避免单一值导致的除零问题
+                vmin, vmax = 0, 1
             
-            plt.figure(figsize=(10, 8))
-            sns.heatmap(rel_saliency, cmap="Reds", square=True, mask=zero_mask, vmin=vmin, vmax=vmax)
-            plt.title(f"Average Saliency Map: {label_name} ({rel_name})")
-            plt.tight_layout()
+            sns.heatmap(rel_saliency, cmap="Reds", square=True, mask=(rel_saliency == 0), 
+                        vmin=vmin, vmax=vmax, ax=ax, cbar=True, cbar_kws={'shrink': 0.6})
+        ax.set_title(f'{rel_name}', fontsize=12, fontweight='bold')
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+    
+    plt.tight_layout()
+    
+    true_out_dir = os.path.join(out_dir, label_name)
+    os.makedirs(true_out_dir, exist_ok=True)
+    pdf_path = os.path.join(true_out_dir, f'saliency_heatmap_{label_name}.pdf')
+    plt.savefig(pdf_path, dpi=300, bbox_inches='tight')
+    plt.savefig(pdf_path.replace('.pdf', '.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved heatmaps to {pdf_path}")
 
-            true_out_dir = os.path.join(out_dir, label_name)
-            os.makedirs(true_out_dir, exist_ok=True)
-            plt.savefig(os.path.join(true_out_dir, f"saliency_heatmap_{label_name}_{rel_name}.pdf"), dpi=300)
-            plt.close()
 
-        # 2. 绘制特定关系维度的大脑 3D 连接图 (Connectome)
+def plot_saliency_connectomes(saliency_matrices, coords, out_dir, label_name, sc_kinds=None, fc_kind=None):
+    """绘制各关系维度的大脑连接图，每个relation单独保存一个PDF
+    
+    命名规则：
+    - relation 0: FA
+    - relation 1: fiber_count
+    - relation 2: fc_kind_pos
+    - relation 3: fc_kind_neg
+    """
+    import os
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from nilearn.plotting import plot_connectome
+
+    mean_saliency = np.mean(saliency_matrices, axis=0)
+    num_relations = mean_saliency.shape[-1] if len(mean_saliency.shape) == 3 else 1
+    
+    if num_relations < 4:
+        raise ValueError(f"Expected at least 4 relations, got {num_relations}")
+    
+    if sc_kinds is None:
+        sc_kinds = ['FA', 'fiber_count']
+    if fc_kind is None:
+        fc_kind = 'pcc_rest'
+    
+    rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
+                 sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
+                 f'{fc_kind}_pos',
+                 f'{fc_kind}_neg']
+    
+    true_out_dir = os.path.join(out_dir, label_name)
+    os.makedirs(true_out_dir, exist_ok=True)
+    
+    for r in range(4):
+        rel_saliency = mean_saliency[:, :, r] if num_relations > 1 else mean_saliency
+        rel_name = rel_names[r]
+        
         non_zero_saliency = rel_saliency[rel_saliency > 0]
-        if len(non_zero_saliency) > 0:
+        
+        if len(non_zero_saliency) > 0 and len(coords) == rel_saliency.shape[0]:
             threshold = np.percentile(non_zero_saliency, 98)
             
-            if len(coords) == rel_saliency.shape[0]:
-                fig = plt.figure(figsize=(10, 5))
-                plot_connectome(rel_saliency, coords, edge_threshold=threshold, 
-                                title=f"Top Saliency Connectome: {label_name} ({rel_name})",
-                                figure=fig, node_size=20, edge_kwargs={'lw': 2})
-                fig.savefig(os.path.join(true_out_dir, f"saliency_connectome_{label_name}_{rel_name}.pdf"), dpi=300)
-                plt.close()
-            else:
-                print(f"Warning: Connectome plot skipped for {label_name} ({rel_name}). Coordinates mismatch.")
+            fig = plt.figure(figsize=(10, 5))
+            plot_connectome(rel_saliency, coords, edge_threshold=threshold, 
+                           title=f"Top Saliency Connectome: {label_name} ({rel_name})",
+                           figure=fig, node_size=20, edge_kwargs={'lw': 2})
+            
+            pdf_path = os.path.join(true_out_dir, f'saliency_connectome_{label_name}_{rel_name}.pdf')
+            fig.savefig(pdf_path, dpi=300, bbox_inches='tight')
+            plt.close()
+            print(f"Saved connectome to {pdf_path}")
+        else:
+            print(f"Warning: Skipping connectome for {rel_name} - no valid data or coordinate mismatch.")

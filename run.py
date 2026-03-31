@@ -103,6 +103,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             lb_pred = model(g_data, lb_data, g_data.batch).squeeze(-1)
             loss = F.smooth_l1_loss(lb_pred, lb_data)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0) # 新增梯度裁剪
             optimizer.step()
             train_loss_tmp.append(loss.item())
         scheduler.step()
@@ -225,6 +226,7 @@ def explain_model(args, testloader, device, label_output_dir):
         # 捕捉该边在当前数值下对预测结果的真实贡献大小
         saliency = (g_test.edge_attr.grad * g_test.edge_attr).abs().detach().cpu().numpy()
         e_idx = g_test.edge_index.detach().cpu().numpy()
+        saliency = np.nan_to_num(saliency, nan=0.0, posinf=0.0, neginf=0.0)
 
         num_nodes = int(np.max(e_idx)) + 1
         num_relations = saliency.shape[1] if len(saliency.shape) > 1 else 1

@@ -7,7 +7,7 @@ matplotlib.use('Agg')  # 【新增】防止在服务器运行时报错
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from vis import build_saliency_matrix, plot_saliency_results, get_coords  # 新增
+from vis import build_saliency_matrix, plot_saliency_heatmaps, plot_saliency_connectomes, get_coords  # 新增
 from nilearn.datasets import fetch_atlas_aal  # 新增
 import nibabel as nib  # 新增
 
@@ -103,8 +103,35 @@ def plot_metric_bars(summary_df, out_dir):
     plt.close()
 
 
+def parse_modalities_from_path(combo_dir):
+    """从 combo_dir 路径中解析 sc_kinds 和 fc_kind
+    
+    路径格式: .../atlas_bna246__sc_FA-fiber_count__fc_pcc_rest/...
+    """
+    import re
+    sc_kinds = ['FA', 'fiber_count']  # 默认值
+    fc_kind = 'pcc_rest'  # 默认值
+    
+    # 匹配 sc_ 后的内容（到 __fc_ 之前）
+    sc_match = re.search(r'__sc_([^_]+(?:-[^_]+)*)__', combo_dir)
+    if sc_match:
+        sc_str = sc_match.group(1)
+        sc_kinds = sc_str.replace('-', ' ').split() if '-' in sc_str else [sc_str]
+    
+    # 匹配 fc_ 后的内容
+    fc_match = re.search(r'__fc_([^/]+)/', combo_dir)
+    if fc_match:
+        fc_kind = fc_match.group(1)
+    
+    return sc_kinds, fc_kind
+
+
 def plot_interpretability(combo_dir, out_dir, coords, label_filter=None):
     """自动遍历各个预测任务，生成 Saliency 解释图"""
+    # 解析 modalities
+    sc_kinds, fc_kind = parse_modalities_from_path(combo_dir)
+    print(f"Detected modalities: sc_kinds={sc_kinds}, fc_kind={fc_kind}")
+    
     for name in sorted(os.listdir(combo_dir)):
         label_dir = os.path.join(combo_dir, name)
         if not os.path.isdir(label_dir) or not name.startswith("label_"):
@@ -140,7 +167,8 @@ def plot_interpretability(combo_dir, out_dir, coords, label_filter=None):
                     sal_matrices.append(build_saliency_matrix(e_idx, s_attr))
             
             # 调用 vis.py 进行画图
-            plot_saliency_results(sal_matrices, coords, out_dir, display_label)
+            plot_saliency_heatmaps(sal_matrices, out_dir, display_label, sc_kinds, fc_kind)
+            plot_saliency_connectomes(sal_matrices, coords, out_dir, display_label, sc_kinds, fc_kind)
         
         # 兼容旧格式
         elif os.path.isfile(old_sal_file) and os.path.isfile(idx_file):
@@ -152,7 +180,8 @@ def plot_interpretability(combo_dir, out_dir, coords, label_filter=None):
             for e_idx, s_attr in zip(edge_indices, saliency_data):
                 sal_matrices.append(build_saliency_matrix(e_idx, s_attr))
             
-            plot_saliency_results(sal_matrices, coords, out_dir, display_label)
+            plot_saliency_heatmaps(sal_matrices, out_dir, display_label, sc_kinds, fc_kind)
+            plot_saliency_connectomes(sal_matrices, coords, out_dir, display_label, sc_kinds, fc_kind)
 
 
 def parse_args():
