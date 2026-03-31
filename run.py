@@ -83,7 +83,8 @@ def build_combo_dir(args, timestamp):
     )
 
 
-def train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir):
+# 注意：函數簽名增加了 lb_mean, lb_std
+def train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, lb_mean, lb_std):
     train_loss = []
     val_loss = []
     tmp_train = os.path.join(label_output_dir, "bt_tmp.pth")
@@ -100,17 +101,20 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             lb_data = lb_data.to(device)
             optimizer.zero_grad()
 
-            # 前向传播：主任务 + GRL 对抗任务
+            # 前向傳播：主任務 + GRL 對抗任務
             out_cog, out_age, out_gender = model(g_data, lb_data, g_data.batch)
 
-            # 主任务损失：认知能力预测
-            loss_cog = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data)
+            # ====== 【核心修改：標籤標準化】 ======
+            lb_data_norm = (lb_data - lb_mean) / (lb_std + 1e-8)
+            
+            # 主任務損失：讓模型去擬合標準化後的標籤
+            loss_cog = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data_norm)
 
-            # 对抗任务损失：年龄回归 + 性别分类
+            # 對抗任務損失：年齡回歸 + 性別分類 (保持不變)
             loss_age = F.smooth_l1_loss(out_age.squeeze(-1), g_data.age.squeeze(-1).to(device))
             loss_gender = F.binary_cross_entropy_with_logits(out_gender.squeeze(-1), g_data.gender.squeeze(-1).to(device))
 
-            # 复合损失：主任务 + 对抗任务（强制特征提取器学习混淆不变表征）
+            # 複合損失：主任務 + 對抗任務
             loss = loss_cog + loss_age + loss_gender
 
             loss.backward()
@@ -126,9 +130,12 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             for g_data, lb_data in valloader:
                 g_data = g_data.to(device)
                 lb_data = lb_data.to(device)
-                # 验证时仅使用主任务输出（忽略对抗分支）
                 out_cog, _, _ = model(g_data, lb_data, g_data.batch)
-                loss = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data)
+                
+                # ====== 【核心修改：驗證集也需要計算標準化後的 Loss】 ======
+                lb_data_norm = (lb_data - lb_mean) / (lb_std + 1e-8)
+                loss = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data_norm)
+                
                 val_loss_tmp.append(loss.item())
         val_loss_v = sum(val_loss_tmp) / len(val_loss_tmp)
 
@@ -161,7 +168,8 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
     df.to_csv(os.path.join(label_output_dir, "loss.csv"), index=False)
 
 
-def evaluate(args, testloader, device, label_output_dir):
+# 注意：函數簽名增加了 lb_mean, lb_std
+def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std):
     model_t = torch.load(
         os.path.join(label_output_dir, "best_validation.pth"),
         weights_only=False,
@@ -181,10 +189,15 @@ def evaluate(args, testloader, device, label_output_dir):
             for g_test, lb_test in testloader:
                 g_test = g_test.to(device)
                 lb_test = lb_test.to(device)
-                # 评估时仅使用主任务输出
+                
+                # 評估時僅使用主任務輸出 (此時預測的是標準化後的值)
                 lb_pred, _, _ = model_t(g_test, lb_test, g_test.batch)
+                
+                # ====== 【核心修改：反標準化，還原為真實量綱】 ======
+                lb_pred_real = lb_pred.squeeze(-1) * lb_std + lb_mean
+                
                 lb_t.append(lb_test.cpu().numpy())
-                lb_p.append(lb_pred.cpu().numpy())
+                lb_p.append(lb_pred_real.cpu().numpy()) # 記錄還原後的值
             
             lb_test = np.array(lb_t).flatten()
             lb_pred = np.array(lb_p).flatten()
@@ -194,7 +207,7 @@ def evaluate(args, testloader, device, label_output_dir):
             total_r2.append(r2_score(lb_test, lb_pred))
             total_p.append(pearsonr(lb_test, lb_pred)[0])
 
-    # 打印到终端
+    # 打印到終端
     print(f"Test Results over {args.test_repeat} repeats:")
     print(f"  RMSE: {np.mean(total_rmse):.4f} ± {np.std(total_rmse):.4f}")
     print(f"  MAE:  {np.mean(total_mae):.4f} ± {np.std(total_mae):.4f}")
@@ -211,7 +224,8 @@ def evaluate(args, testloader, device, label_output_dir):
     df2.to_csv(os.path.join(label_output_dir, "test.csv"), index=False)
 
 
-def explain_model(args, testloader, device, label_output_dir):
+# 注意：函數簽名增加了 lb_mean, lb_std
+def explain_model(args, testloader, device, label_output_dir, lb_mean, lb_std):
     print("\n>>> Extracting Edge-Major Saliency Maps...")
     model_t = torch.load(
         os.path.join(label_output_dir, "best_validation.pth"),
@@ -219,7 +233,6 @@ def explain_model(args, testloader, device, label_output_dir):
     ).to(device)
     model_t.eval()
 
-    # 强制 batch_size=1，避免 PyG DataLoader 拼接多图导致节点 ID 偏移
     from torch_geometric.loader import DataLoader
     expl_loader = DataLoader(testloader.dataset, batch_size=1, shuffle=False)
 
@@ -227,17 +240,15 @@ def explain_model(args, testloader, device, label_output_dir):
 
     for g_test, lb_test in expl_loader:
         g_test, lb_test = g_test.to(device), lb_test.to(device)
-
-        # 允许计算关于输入边属性的梯度
         g_test.edge_attr.requires_grad = True
 
-        # 可解释性分析仅使用主任务输出
         lb_pred, _, _ = model_t(g_test, lb_test, g_test.batch)
-        loss = torch.abs(lb_pred.squeeze(-1) - lb_test).mean()
+        
+        # ====== 【核心修改：反標準化後再算解釋性Loss，確保梯度量級正確】 ======
+        lb_pred_real = lb_pred.squeeze(-1) * lb_std + lb_mean
+        loss = torch.abs(lb_pred_real - lb_test).mean()
         loss.backward()
 
-        # 【核心改进 1】: 采用 Input * Gradient (类似 EdgeSHAPer 的特征贡献度近似)
-        # 捕捉该边在当前数值下对预测结果的真实贡献大小
         saliency = (g_test.edge_attr.grad * g_test.edge_attr).abs().detach().cpu().numpy()
         e_idx = g_test.edge_index.detach().cpu().numpy()
         saliency = np.nan_to_num(saliency, nan=0.0, posinf=0.0, neginf=0.0)
@@ -245,21 +256,16 @@ def explain_model(args, testloader, device, label_output_dir):
         num_nodes = int(np.max(e_idx)) + 1
         num_relations = saliency.shape[1] if len(saliency.shape) > 1 else 1
         
-        # 将邻接矩阵扩展为 3D: (num_nodes, num_nodes, num_relations)
         sal_mat = np.zeros((num_nodes, num_nodes, num_relations))
         
-        # 【核心改进 2】: 针对每一种类型的边（SC/FC）进行独立的 Min-Max 归一化
         for r in range(num_relations):
             sal_r = saliency[:, r] if num_relations > 1 else saliency
-            
-            # 独立归一化到 [0, 1]，消除不同网络属性的量纲壁垒
             max_val, min_val = sal_r.max(), sal_r.min()
             if max_val > min_val:
                 sal_r_norm = (sal_r - min_val) / (max_val - min_val)
             else:
                 sal_r_norm = np.zeros_like(sal_r)
             
-            # 填入对应关系通道的矩阵
             for k in range(e_idx.shape[1]):
                 i, j = int(e_idx[0, k]), int(e_idx[1, k])
                 sal_mat[i, j, r] = sal_r_norm[k]
@@ -267,7 +273,6 @@ def explain_model(args, testloader, device, label_output_dir):
                 
         all_sal_matrices.append(sal_mat)
 
-    # 存盘
     np.save(os.path.join(label_output_dir, "saliency_matrices.npy"), np.array(all_sal_matrices))
     print(f"Interpretability evidence saved to {label_output_dir}")
 
@@ -383,9 +388,10 @@ def main():
             optimizer, milestones=[30, 60, 80], gamma=0.5
         )
 
-        train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir)
-        evaluate(args, testloader, device, label_output_dir)
-        explain_model(args, testloader, device, label_output_dir)
+        # (這裡是你原本 main 函數結尾的調用部分，請替換成下面這樣)
+        train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, lb_mean, lb_std)
+        evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std)
+        explain_model(args, testloader, device, label_output_dir, lb_mean, lb_std)
 
 
 if __name__ == "__main__":
