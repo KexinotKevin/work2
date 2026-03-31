@@ -89,21 +89,27 @@ class relationGCN(MessagePassing):
 
         return new_attr
 
-    # 优化调整：防止 norm 函数污染原始的边属性，创建一个新的张量来专门存放归一化后的结果即可。
+    # 优化调整：使用 list 收集并 stack，完美维持计算图 (Gradient Flow)
     @staticmethod
     def norm(edge_index, num_nodes, edge_attr, dtype=None):
         row, col = edge_index
         num_relations = edge_attr.size(1)
-        # 创建一个形状和类型一致的新张量，防止污染传给下一层的原始特征
-        norm_edge_attr = torch.empty_like(edge_attr) 
-        
+
+        # 【关键修复】：使用 list 保存每个关系的归一化结果
+        norm_edge_attr_list = []
+
         for r in range(num_relations):
             edge_weight = edge_attr[:, r].clone()
             deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
             deg_inv_sqrt = deg.pow(-0.5)
             deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
             norm = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
-            norm_edge_attr[:, r] = norm  # 赋值给新张量
+
+            # 存入列表
+            norm_edge_attr_list.append(norm)
+
+        # 【关键修复】：沿特征维度将 list 拼接为一个新的计算图张量
+        norm_edge_attr = torch.stack(norm_edge_attr_list, dim=1)
 
         return edge_index, norm_edge_attr
 
@@ -192,19 +198,29 @@ class RGCN(MessagePassing):
 
         return new_attr
 
+    # 使用 list 收集并 stack，完美维持计算图 (Gradient Flow)
     @staticmethod
     def norm(edge_index, num_nodes, edge_attr, dtype=None):
         row, col = edge_index
         num_relations = edge_attr.size(1)
+
+        # 【关键修复】：使用 list 保存每个关系的归一化结果
+        norm_edge_attr_list = []
+
         for r in range(num_relations):
             edge_weight = edge_attr[:, r].clone()
             deg = scatter_add(edge_weight, row, dim=0, dim_size=num_nodes)
             deg_inv_sqrt = deg.pow(-0.5)
             deg_inv_sqrt[deg_inv_sqrt == float('inf')] = 0
             norm = deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
-            edge_attr[:, r] = norm
 
-        return edge_index, edge_attr
+            # 存入列表
+            norm_edge_attr_list.append(norm)
+
+        # 【关键修复】：沿特征维度将 list 拼接为一个新的计算图张量
+        norm_edge_attr = torch.stack(norm_edge_attr_list, dim=1)
+
+        return edge_index, norm_edge_attr
 
 
 class GCN(MessagePassing):
