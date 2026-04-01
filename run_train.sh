@@ -17,15 +17,14 @@ conda activate gnn_work2
 
 python run.py --use_dataset_cfg \
     --num_epochs 50 \
-    --dataset_name S1200 \
-    --atlas_name bna246 \
+    --dataset_name ABCD \
+    --atlas_name schaefer200_S1 \
     --sc_kinds FA fiber_count \
     --fc_kind pcc_rest \
-    --label_types 'CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
-    --output_root ./results_full \
-    --dropout 0.3 \
-    --depth 3 \
+    --label_types 'nihtbx_fluidcomp_uncorrected','nihtbx_cryst_uncorrected','nihtbx_totalcomp_uncorrected' \
+    --output_root ./results_full_schaefer200_S1 \
     --no_normalize_labels \
+    --use_early_stopping \
     --use_dynamic_lr \
     --lr_patience 10 \
     --lr_factor 0.5 \

@@ -12,108 +12,7 @@ import torch.nn.functional as F
 
 from dataset import dataset
 from model_r import LGUNet_rela
-
-
-class DynamicLearningRateScheduler:
-    """动态学习率调度器，结合loss plateau检测和梯度监控
-    
-    策略：
-    1. 当loss plateau时降低学习率（patience轮内未改善）
-    2. 当梯度范数持续过小时适当增大学习率
-    3. 当梯度范数过大时减小学习率防止震荡
-    4. 支持warmup阶段平滑起步
-    """
-    
-    def __init__(self, optimizer, base_lr, min_lr=1e-6, 
-                 patience=10, factor=0.5, warmup_epochs=5,
-                 grad_norm_thresh_low=0.01, grad_norm_thresh_high=10.0,
-                 increase_lr_factor=1.05, window_size=5):
-        self.optimizer = optimizer
-        self.base_lr = base_lr
-        self.min_lr = min_lr
-        self.patience = patience
-        self.factor = factor
-        self.warmup_epochs = warmup_epochs
-        self.grad_norm_thresh_low = grad_norm_thresh_low
-        self.grad_norm_thresh_high = grad_norm_thresh_high
-        self.increase_lr_factor = increase_lr_factor
-        self.window_size = window_size
-        
-        self.current_lr = base_lr
-        self.best_loss = float('inf')
-        self.wait_count = 0
-        self.grad_history = []
-        self.loss_history = []
-        self.increase_count = 0  # 防止无限增大学习率
-        
-    def step(self, epoch, loss, grad_norm=None):
-        """更新学习率
-        
-        Args:
-            epoch: 当前epoch
-            loss: 当前epoch的loss
-            grad_norm: 当前batch的梯度范数（可选）
-        """
-        self.loss_history.append(loss)
-        
-        # Warmup阶段：线性增加学习率
-        if epoch < self.warmup_epochs:
-            lr = self.base_lr * (epoch + 1) / self.warmup_epochs
-            self._set_lr(lr)
-            return lr
-            
-        # 记录梯度范数
-        if grad_norm is not None:
-            self.grad_history.append(grad_norm)
-            if len(self.grad_history) > self.window_size:
-                self.grad_history.pop(0)
-        
-        # 策略1: Loss plateau检测
-        if loss < self.best_loss - 1e-6:
-            self.best_loss = loss
-            self.wait_count = 0
-        else:
-            self.wait_count += 1
-            
-        # 策略2: 基于梯度范数的调整
-        lr_adjustment = 1.0
-        if len(self.grad_history) >= self.window_size:
-            avg_grad = np.mean(self.grad_history)
-            
-            # 梯度过小：可能陷入plateau，适当增大学习率
-            if avg_grad < self.grad_norm_thresh_low and self.increase_count < 3:
-                lr_adjustment = self.increase_lr_factor
-                self.increase_count += 1
-            # 梯度过大：可能震荡，减小学习率
-            elif avg_grad > self.grad_norm_thresh_high:
-                lr_adjustment = 0.7
-                self.increase_count = 0
-            else:
-                self.increase_count = 0
-        
-        # 综合调整
-        if self.wait_count >= self.patience:
-            new_lr = max(self.current_lr * self.factor, self.min_lr)
-            self.wait_count = 0
-            self.increase_count = 0  # 重置增加计数
-        else:
-            new_lr = self.current_lr * lr_adjustment
-            new_lr = max(new_lr, self.min_lr)
-            new_lr = min(new_lr, self.base_lr)  # 不超过初始学习率
-            
-        if abs(new_lr - self.current_lr) > 1e-9:
-            self._set_lr(new_lr)
-            
-        return self.current_lr
-    
-    def _set_lr(self, lr):
-        """设置所有参数组的学习率"""
-        self.current_lr = lr
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-            
-    def get_lr(self):
-        return self.current_lr
+from strategies import EarlyStopping, DynamicLearningRateScheduler
 
 
 def setup_logging(output_root, timestamp=None):
@@ -185,12 +84,16 @@ def build_combo_dir(args, timestamp):
     )
 
 
-# 注意：函數簽名增加了 lb_mean, lb_std, age_scale
-def train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, lb_mean, lb_std, age_scale=100.0, use_dynamic_lr=False, dynamic_scheduler=None):
+# 注意：函數簽名增加了 lb_mean, lb_std, age_scale, early_stopping, valloader, testloader, device
+def train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, 
+          lb_mean, lb_std, age_scale=100.0, use_dynamic_lr=False, dynamic_scheduler=None,
+          early_stopping=None, testloader=None):
     train_loss = []
     val_loss = []
     lr_history = []
     grad_norm_history = []
+    epochs_trained = 0  # 记录实际训练轮数
+    best_val_epoch = 0  # 记录最佳验证 loss 的 epoch
     tmp_train = os.path.join(label_output_dir, "bt_tmp.pth")
     tmp_val = os.path.join(label_output_dir, "bv_tmp.pth")
     remove_pattern(os.path.join(label_output_dir, "bt_tmp*.pth"))
@@ -277,6 +180,12 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
 
         train_loss.append(train_loss_v)
         val_loss.append(val_loss_v)
+        epochs_trained = epoch + 1
+        
+        # 记录最佳 epoch
+        if val_loss_v <= min(val_loss):
+            best_val_epoch = epoch
+        
         print(
             "Epoch: {:04d}".format(epoch + 1),
             "loss_train: {:.4f}".format(train_loss_v),
@@ -290,6 +199,27 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             torch.save(model, tmp_train)
         if val_loss_v <= min(val_loss):
             torch.save(model, tmp_val)
+        
+        # ====== 【早停检查】 ======
+        if early_stopping is not None:
+            # 获取当前模型状态用于保存最佳权重
+            model_state = model.state_dict()
+            should_stop = early_stopping(epoch, val_loss_v, model_state)
+            if should_stop:
+                print(f"\n>>> Early stopping at epoch {epoch + 1}. Training stopped.")
+                print(f">>> Total epochs trained: {epochs_trained}")
+                print(f">>> Best validation loss was at epoch {early_stopping.get_best_epoch() + 1}")
+                best_val_epoch = early_stopping.get_best_epoch()
+                # 恢复最佳模型权重
+                early_stopping.restore_weights(model)
+                # 重新保存最佳验证模型
+                torch.save(model, os.path.join(label_output_dir, "best_validation.pth"))
+                break
+    
+    # 如果没有触发早停，正常保存最后保存的最佳模型
+    if early_stopping is None or not early_stopping.should_stop:
+        print(f"\n>>> Training completed for all {epochs_trained} epochs without early stopping.")
+        print(f">>> Best validation loss was at epoch {best_val_epoch + 1}")
 
     best_train_path = os.path.join(label_output_dir, "best_train.pth")
     best_val_path = os.path.join(label_output_dir, "best_validation.pth")
@@ -299,6 +229,21 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
         os.remove(best_val_path)
     os.replace(tmp_train, best_train_path)
     os.replace(tmp_val, best_val_path)
+    
+    # ====== 【保存最佳验证模型的 Saliency Map】 ======
+    # 使用验证集数据生成 saliency map 并保存
+    print("\n>>> Extracting Saliency Maps from Best Validation Model (on Val Set)...")
+    model_best = torch.load(best_val_path, weights_only=False).to(device)
+    sal_val = extract_saliency_map(model_best, valloader, device, lb_mean, lb_std)
+    np.save(os.path.join(label_output_dir, "saliency_matrices_val.npy"), np.array(sal_val))
+    print(f">>> Saliency maps (val set, {len(sal_val)} samples) saved to saliency_matrices_val.npy")
+    
+    # 如果提供了测试集，也生成测试集的 saliency map
+    if testloader is not None:
+        print("\n>>> Extracting Saliency Maps from Best Validation Model (on Test Set)...")
+        sal_test = extract_saliency_map(model_best, testloader, device, lb_mean, lb_std)
+        np.save(os.path.join(label_output_dir, "saliency_matrices_test.npy"), np.array(sal_test))
+        print(f">>> Saliency maps (test set, {len(sal_test)} samples) saved to saliency_matrices_test.npy")
 
     df = pd.DataFrame(columns=["train_loss", "val_loss", "learning_rate", "grad_norm"])
     df["train_loss"] = train_loss
@@ -306,6 +251,8 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
     df["learning_rate"] = lr_history
     df["grad_norm"] = grad_norm_history
     df.to_csv(os.path.join(label_output_dir, "loss.csv"), index=False)
+    
+    return epochs_trained, best_val_epoch
 
 
 # 注意：函數簽名增加了 age_scale
@@ -365,32 +312,35 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
 
 
 # 注意：函數簽名增加了 age_scale
-def explain_model(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale=100.0):
-    print("\n>>> Extracting Edge-Major Saliency Maps...")
-    model_t = torch.load(
-        os.path.join(label_output_dir, "best_validation.pth"),
-        weights_only=False,
-    ).to(device)
-    model_t.eval()
-
-    from torch_geometric.loader import DataLoader
-    expl_loader = DataLoader(testloader.dataset, batch_size=1, shuffle=False)
-
+def extract_saliency_map(model, dataloader, device, lb_mean, lb_std):
+    """从模型和数据加载器中提取 saliency map
+    
+    Args:
+        model: 训练好的模型
+        dataloader: 数据加载器
+        device: 计算设备
+        lb_mean: 标签均值（用于反标准化）
+        lb_std: 标签标准差（用于反标准化）
+    
+    Returns:
+        all_sal_matrices: saliency 矩阵列表
+    """
+    model.eval()
     all_sal_matrices = []
+    
+    for g_data, lb_data in dataloader:
+        g_data, lb_data = g_data.to(device), lb_data.to(device)
+        g_data.edge_attr.requires_grad = True
 
-    for g_test, lb_test in expl_loader:
-        g_test, lb_test = g_test.to(device), lb_test.to(device)
-        g_test.edge_attr.requires_grad = True
-
-        lb_pred, _, _ = model_t(g_test, lb_test, g_test.batch)
+        lb_pred, _, _ = model(g_data, lb_data, g_data.batch)
         
-        # ====== 【核心修改：反標準化後再算解釋性Loss，確保梯度量級正確】 ======
+        # 反标准化后再算解释性 Loss，确保梯度量级正确
         lb_pred_real = lb_pred.squeeze(-1) * lb_std + lb_mean
-        loss = torch.abs(lb_pred_real - lb_test).mean()
+        loss = torch.abs(lb_pred_real - lb_data).mean()
         loss.backward()
 
-        saliency = (g_test.edge_attr.grad * g_test.edge_attr).abs().detach().cpu().numpy()
-        e_idx = g_test.edge_index.detach().cpu().numpy()
+        saliency = (g_data.edge_attr.grad * g_data.edge_attr).abs().detach().cpu().numpy()
+        e_idx = g_data.edge_index.detach().cpu().numpy()
         saliency = np.nan_to_num(saliency, nan=0.0, posinf=0.0, neginf=0.0)
 
         num_nodes = int(np.max(e_idx)) + 1
@@ -412,9 +362,8 @@ def explain_model(args, testloader, device, label_output_dir, lb_mean, lb_std, a
                 sal_mat[j, i, r] = sal_r_norm[k]
                 
         all_sal_matrices.append(sal_mat)
-
-    np.save(os.path.join(label_output_dir, "saliency_matrices.npy"), np.array(all_sal_matrices))
-    print(f"Interpretability evidence saved to {label_output_dir}")
+    
+    return all_sal_matrices
 
 
 def parse_args():
@@ -435,8 +384,8 @@ def parse_args():
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=0.01)
     parser.add_argument("--l2_penalty", type=float, default=0.001)
-    parser.add_argument("--input_dimension", type=int, default=246)
-    parser.add_argument("--hidden_dimension", type=int, default=246)
+    parser.add_argument("--input_dimension", type=int, default=216)
+    parser.add_argument("--hidden_dimension", type=int, default=216)
     parser.add_argument("--output_dimension", type=int, default=1)
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.5)
@@ -462,6 +411,20 @@ def parse_args():
                         help="Minimum learning rate for dynamic scheduler")
     parser.add_argument("--warmup_epochs", type=int, default=5,
                         help="Number of warmup epochs for learning rate")
+    
+    # 早停参数
+    parser.add_argument("--use_early_stopping", action="store_true", default=False,
+                        help="Enable early stopping based on validation loss")
+    parser.add_argument("--early_stopping_patience", type=int, default=15,
+                        help="Patience for early stopping (number of epochs with no improvement)")
+    parser.add_argument("--early_stopping_min_delta", type=float, default=1e-4,
+                        help="Minimum change to qualify as an improvement")
+    parser.add_argument("--early_stopping_min_epochs", type=int, default=10,
+                        help="Minimum number of epochs before early stopping can trigger")
+    parser.add_argument("--early_stopping_restore_best", action="store_true", default=True,
+                        help="Restore best model weights when early stopping triggers")
+    parser.add_argument("--early_stopping_no_restore_best", action="store_false", dest="early_stopping_restore_best",
+                        help="Do not restore best model weights when early stopping triggers")
     return parser.parse_args()
 
 
@@ -570,12 +533,29 @@ def main():
             scheduler = torch.optim.lr_scheduler.MultiStepLR(
                 optimizer, milestones=[30, 60, 80], gamma=0.5
             )
+        
+        # 创建早停对象（如果启用）
+        early_stopping = None
+        if args.use_early_stopping:
+            early_stopping = EarlyStopping(
+                patience=args.early_stopping_patience,
+                min_delta=args.early_stopping_min_delta,
+                mode='min',  # 监控验证loss，越小越好
+                restore_best_weights=args.early_stopping_restore_best,
+                min_epochs=args.early_stopping_min_epochs,
+                verbose=True,
+            )
+            print(f"Early Stopping ENABLED: patience={args.early_stopping_patience}, "
+                  f"min_delta={args.early_stopping_min_delta}, "
+                  f"min_epochs={args.early_stopping_min_epochs}, "
+                  f"restore_best={args.early_stopping_restore_best}")
 
         # (這裡是你原本 main 函數結尾的調用部分，請替換成下面這樣)
         train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, 
-              lb_mean, lb_std, age_scale, use_dynamic_lr=args.use_dynamic_lr, dynamic_scheduler=dynamic_scheduler)
+              lb_mean, lb_std, age_scale, use_dynamic_lr=args.use_dynamic_lr, 
+              dynamic_scheduler=dynamic_scheduler, early_stopping=early_stopping,
+              testloader=testloader)
         evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale)
-        explain_model(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale)
 
 
 if __name__ == "__main__":

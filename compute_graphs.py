@@ -143,7 +143,7 @@ def plot_interpretability(combo_dir, out_dir, coords, label_filter=None):
         if label_filter and display_label not in label_filter:
             continue
         
-        sal_file = os.path.join(label_dir, "saliency_matrices.npy")
+        sal_file = os.path.join(label_dir, "saliency_matrices_test.npy")
         idx_file = os.path.join(label_dir, "edge_indices.npy")
         old_sal_file = os.path.join(label_dir, "saliency_maps.npy")
         
