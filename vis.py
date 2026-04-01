@@ -257,7 +257,7 @@ def plot_saliency_connectomes(saliency_matrices, coords, out_dir, label_name, sc
         non_zero_saliency = rel_saliency[rel_saliency > 0]
         
         if len(non_zero_saliency) > 0 and len(coords) == rel_saliency.shape[0]:
-            threshold = np.percentile(non_zero_saliency, 98)
+            threshold = np.percentile(non_zero_saliency, 90)
             
             fig = plt.figure(figsize=(10, 5))
             plot_connectome(rel_saliency, coords, edge_threshold=threshold, 
