@@ -21,7 +21,7 @@ python run.py --use_dataset_cfg \
     --atlas_name bna246 \
     --sc_kinds FA fiber_count \
     --fc_kind pcc_rest \
-    --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
+    --label_types 'CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
     --output_root ./results_full \
     --dropout 0.3 \
     --depth 3 \

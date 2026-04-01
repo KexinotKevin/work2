@@ -217,6 +217,71 @@ def plot_saliency_heatmaps(saliency_matrices, out_dir, label_name, sc_kinds=None
     print(f"Saved heatmaps to {pdf_path}")
 
 
+def _get_cortical_mask(coords, threshold=None):
+    """根据Y坐标自动识别皮层节点
+    
+    BNA246等脑模板中，皮层节点通常具有较高的Y值。
+    自动检测方法：使用Y值的60%分位数作为阈值，可适应不同脑图谱。
+    """
+    if coords is None or len(coords) == 0:
+        return None
+    
+    y_values = coords[:, 1]
+    
+    if threshold is None:
+        # 自动检测：使用60%分位数作为皮层阈值
+        threshold = np.percentile(y_values, 60)
+    
+    return y_values >= threshold
+
+def _normalize_by_region(saliency_matrix, cortical_mask):
+    """对皮层和非皮层区域的边分别做min-max归一化，再合并"""
+    import numpy as np
+    
+    result = np.zeros_like(saliency_matrix)
+    n = saliency_matrix.shape[0]
+    cortical_set = set(np.where(cortical_mask)[0]) if cortical_mask is not None else set()
+    
+    # 收集皮层边和非皮层边的值
+    cortical_edges = []
+    non_cortical_edges = []
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            val = saliency_matrix[i, j]
+            if val > 0:
+                if cortical_mask is not None and i in cortical_set and j in cortical_set:
+                    cortical_edges.append(val)
+                else:
+                    non_cortical_edges.append(val)
+    
+    # 分别归一化
+    def minmax_norm(values):
+        if len(values) == 0:
+            return lambda x: 0
+        vmin, vmax = np.min(values), np.max(values)
+        if vmax > vmin:
+            return lambda x: (x - vmin) / (vmax - vmin)
+        return lambda x: np.zeros_like(x) if isinstance(x, np.ndarray) else 0
+    
+    cortical_norm = minmax_norm(cortical_edges)
+    non_cortical_norm = minmax_norm(non_cortical_edges)
+    
+    # 填充结果矩阵（对称）
+    for i in range(n):
+        for j in range(i + 1, n):
+            val = saliency_matrix[i, j]
+            if val > 0:
+                if cortical_mask is not None and i in cortical_set and j in cortical_set:
+                    norm_val = cortical_norm(val)
+                else:
+                    norm_val = non_cortical_norm(val)
+                result[i, j] = norm_val
+                result[j, i] = norm_val
+    
+    return result
+
+
 def plot_saliency_connectomes(saliency_matrices, coords, out_dir, label_name, sc_kinds=None, fc_kind=None):
     """绘制各关系维度的大脑连接图，每个relation单独保存一个PDF
     
@@ -250,9 +315,16 @@ def plot_saliency_connectomes(saliency_matrices, coords, out_dir, label_name, sc
     true_out_dir = os.path.join(out_dir, label_name)
     os.makedirs(true_out_dir, exist_ok=True)
     
+    # 识别皮层节点（自动检测阈值）
+    cortical_mask = _get_cortical_mask(coords)
+    
     for r in range(4):
         rel_saliency = mean_saliency[:, :, r] if num_relations > 1 else mean_saliency
         rel_name = rel_names[r]
+        
+        # 【核心修改】对皮层和非皮层区域分别归一化
+        if cortical_mask is not None:
+            rel_saliency = _normalize_by_region(rel_saliency, cortical_mask)
         
         non_zero_saliency = rel_saliency[rel_saliency > 0]
         
