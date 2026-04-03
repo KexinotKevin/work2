@@ -1,5 +1,10 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
+# 用 `bash run_train.sh` 运行时是非交互 shell，必须先加载 conda 的 shell 集成，否则会出现:
+#   CondaError: Run 'conda init' before 'conda activate'
+set -e
+CONDA_BASE="$(conda info --base)"
+# shellcheck source=/dev/null
+source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate gnn_work2
 
 # ============================================
@@ -23,7 +28,6 @@ python run.py --use_dataset_cfg \
     --fc_kind pcc_rest \
     --label_types 'nihtbx_fluidcomp_uncorrected','nihtbx_cryst_uncorrected','nihtbx_totalcomp_uncorrected' \
     --output_root ./results_full_schaefer200_S1 \
-    --no_normalize_labels \
     --use_early_stopping \
     --use_dynamic_lr \
     --lr_patience 10 \

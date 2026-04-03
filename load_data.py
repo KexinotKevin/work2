@@ -8,14 +8,24 @@ from torch_geometric.data import data as D
 import os
         
 def load_connectivity_matrix(filename, isheader=False):
-    if isheader:
-        mat = pd.read_csv(filename, header=None).values
-    else:
-        mat = pd.read_csv(filename).values
+    try:
+        if isheader:
+            mat = pd.read_csv(filename, header=None).values
+        else:
+            mat = pd.read_csv(filename).values
+    except pd.errors.EmptyDataError as e:
+        raise RuntimeError(
+            f"Connectivity CSV is empty or has no parseable columns: {osp.abspath(filename)}"
+        ) from e
     return mat
 
-def get_node_feature(dim):
-    return sp.identity(dim).toarray()
+def get_node_feature(num_nodes):
+    """Constant 1-D per-node features so PyG can batch graphs with different node counts.
+
+    Previously an N×N identity was used, which makes feature dimension equal to N; then any
+    subject whose connectivity matrix is not N×N (e.g. 215 vs 216) breaks Batch.from_data_list.
+    """
+    return np.ones((num_nodes, 1), dtype=np.float64)
 
 def label_bucketization(value):
     buckets = [(0, 90), (90, 100), (100, 110), (110, 120), (120, 130), (130, 140), (140, 150), (150, float('inf'))]
@@ -54,10 +64,18 @@ from sklearn.preprocessing import normalize
 
 
 def _resolve_conn_file(base_path):
-    if osp.isfile(base_path):
+    """Resolve connectivity file path; ignore missing or zero-byte placeholders."""
+
+    def _usable(path):
+        try:
+            return osp.isfile(path) and osp.getsize(path) > 0
+        except OSError:
+            return False
+
+    if _usable(base_path):
         return base_path
     csv_path = base_path + ".csv"
-    if osp.isfile(csv_path):
+    if _usable(csv_path):
         return csv_path
     return None
 
@@ -115,7 +133,8 @@ def load_data(
     # ==================== 【核心新增 1：初始化磁盘缓存机制】 ====================
     atlas_tag = atlas_name if atlas_name else "default"
     sc_tag = "-".join(sc_netnames)
-    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}.pt".replace("/", "_")
+    # Bump cache tag when node feature layout changes (old caches used N×N identity).
+    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}_nx1.pt".replace("/", "_")
     cache_path = osp.join(netDir, cache_filename)
 
     graph_dict = {}
@@ -182,8 +201,25 @@ def load_data(
                     sc_mat = load_connectivity_matrix(osp.join(netDir, sc_netnames[0], matname))
                     sc_mats = [sc_mat]
                     fc_mat = load_connectivity_matrix(osp.join(netDir, fc_netname, matname), isheader=Isheader)
-                
-                feat = torch.tensor(get_node_feature(len(fc_mat[0])))
+
+                if fc_mat.shape[0] != fc_mat.shape[1]:
+                    print(
+                        f"[load_data] skip subject {subj}: FC matrix not square, shape {fc_mat.shape}"
+                    )
+                    continue
+                n_nodes = int(fc_mat.shape[0])
+                sc_mismatch = False
+                for idx, sm in enumerate(sc_mats):
+                    if sm.shape != (n_nodes, n_nodes):
+                        print(
+                            f"[load_data] skip subject {subj}: SC[{idx}] shape {sm.shape} != FC ({n_nodes},{n_nodes})"
+                        )
+                        sc_mismatch = True
+                        break
+                if sc_mismatch:
+                    continue
+
+                feat = torch.tensor(get_node_feature(n_nodes))
                 edge_in = []
                 edge_out = []
                 edge_attr_l = []
@@ -232,4 +268,11 @@ def load_data(
     # =========================================================================
 
     print("dataset size: {} subjects".format(len(graph_list)))
+    if len(graph_list) == 0:
+        hint = (
+            f"No valid graphs under netDir={netDir!r}, atlas={atlas_name!r}. "
+            "Check SC/FC CSVs exist, are non-empty, and names match dataset_cfg "
+            f"(FC file key -> {fc_netname!r})."
+        )
+        raise RuntimeError(hint)
     return graph_list

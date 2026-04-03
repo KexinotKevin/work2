@@ -53,14 +53,15 @@ class LGUNet_rela(torch.nn.Module):
 
         channels = self.hidden_channels
 
+        self.relation_num = int(getattr(args, "relation_num", 3))
         self.input_layer = relationGCN(in_dim=self.in_channels,
                                 out_dim=self.hidden_channels,
-                                relation_num=3)
+                                relation_num=self.relation_num)
         self.down_convs = nn.ModuleList()
         self.pools = nn.ModuleList()
         for i in range(self.depth):
             self.pools.append(LGMVPool(channels, self.pool_ratios[i], 0.3))
-            self.down_convs.append(relationGCN(in_dim=self.hidden_channels, out_dim=self.hidden_channels, relation_num=3))
+            self.down_convs.append(relationGCN(in_dim=self.hidden_channels, out_dim=self.hidden_channels, relation_num=self.relation_num))
 
         # build reconstruction
         # in_channels = channels if sum_res else 2 * channels

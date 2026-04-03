@@ -384,7 +384,18 @@ def parse_args():
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--learning_rate", type=float, default=0.01)
     parser.add_argument("--l2_penalty", type=float, default=0.001)
-    parser.add_argument("--input_dimension", type=int, default=216)
+    parser.add_argument(
+        "--input_dimension",
+        type=int,
+        default=1,
+        help="Node feature dim (use 1 with load_data.get_node_feature; N×N identity is not batchable across varying N).",
+    )
+    parser.add_argument(
+        "--relation_num",
+        type=int,
+        default=None,
+        help="Edge relation count = len(sc_kinds)+2 (FC pos/neg). Default: inferred from sc_kinds.",
+    )
     parser.add_argument("--hidden_dimension", type=int, default=216)
     parser.add_argument("--output_dimension", type=int, default=1)
     parser.add_argument("--depth", type=int, default=3)
@@ -436,6 +447,9 @@ def main():
     # 初始化日志，使用已有的 timestamp，并使用追加模式
     _, log_file = setup_logging(args.output_root, timestamp)
     args.sc_kinds_resolved = args.sc_kinds if args.sc_kinds is not None else [x.strip() for x in str(args.sc_kind).split(",") if x.strip()]
+    if args.relation_num is None:
+        args.relation_num = len(args.sc_kinds_resolved) + 2
+    print("relation_num (edge_attr channels): {}".format(args.relation_num))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
