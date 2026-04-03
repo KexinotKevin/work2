@@ -26,7 +26,7 @@ def get_node_feature(num_nodes):
     Previously an N×N identity was used, which makes feature dimension equal to N; then any
     subject whose connectivity matrix is not N×N (e.g. 215 vs 216) breaks Batch.from_data_list.
     """
-    return np.ones((num_nodes, 1), dtype=np.float64)
+    return np.eye(num_nodes, dtype=np.float64)
 
 def label_bucketization(value):
     buckets = [(0, 90), (90, 100), (100, 110), (110, 120), (120, 130), (130, 140), (140, 150), (150, float('inf'))]
@@ -143,6 +143,8 @@ def load_data(
     if osp.exists(cache_path):
         print(f">>> Loading cached graph structures from {cache_path} (Super Fast!)...")
         graph_dict = _torch_load_graph_cache(cache_path)
+        # for debug
+        graph_dict = dict(sorted(graph_dict.items(), key=lambda x: x[0], reverse=True)[:300])
     else:
         print(">>> No cache found. Parsing massive raw CSVs (This will only happen ONCE)...")
     new_graphs_processed = False
@@ -207,8 +209,13 @@ def load_data(
             print(">>> Calculating group consistency threshold (p=0.75)...")
             # 处理所有 SC
             W_thr_sc_list = []
+            global_sc_max = []  # 【新增】：记录每种 SC 的全局最大值
             for sc_idx in range(num_sc):
                 Ws_sc = np.stack([rm['sc_mats'][sc_idx] for rm in raw_mats_list], axis=2)
+                
+                # 【新增】：提取该 SC 特征在所有受试者中的全局最大绝对值
+                global_sc_max.append(np.max(np.abs(Ws_sc)))
+                
                 W_thr_sc = threshold_consistency(Ws_sc, 0.75)
                 global_mask |= (W_thr_sc != 0)
                 W_thr_sc_list.append(W_thr_sc)
@@ -249,11 +256,19 @@ def load_data(
 
                 edge_attr = torch.tensor(edge_attr_l, dtype=feat.dtype, device=feat.device)
 
-                # 【修复核心 Bug】使用 max 而非 sum，防止边权重被稀释到 0
+                # ===================== 【新代码】全局归一化 + Fisher Z 变换 =====================
                 for i in range(edge_attr.size(1)):
-                    max_val = torch.max(torch.abs(edge_attr[:, i]))
-                    if max_val > 0:
-                        edge_attr[:, i] = edge_attr[:, i] / max_val
+                    if i < num_sc:
+                        # 对于 SC 特征（如 FA, fiber_count），除以对应通道的【全局最大值】
+                        if global_sc_max[i] > 0:
+                            edge_attr[:, i] = edge_attr[:, i] / global_sc_max[i]
+                    else:
+                        # 对于 FC 特征（原代码已分离为正相关和负相关的绝对值，区间为 [0, 1]）
+                        # 使用 Fisher Z 变换展开分布: 0.5 * ln((1+r)/(1-r))
+                        # 截断 r 在 0.99 以内，防止 log(0) 或产生无穷大(Inf)
+                        fc_vals = torch.clamp(edge_attr[:, i], min=0.0, max=0.99)
+                        edge_attr[:, i] = 0.5 * torch.log((1 + fc_vals) / (1 - fc_vals))
+                # =============================================================================
 
                 g_data = D.Data()
                 g_data.x, g_data.edge_index, g_data.edge_attr = feat, torch.tensor([edge_in, edge_out]), edge_attr

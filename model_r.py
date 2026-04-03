@@ -62,11 +62,18 @@ class LGUNet_rela(torch.nn.Module):
         self.input_layer = relationGCN(in_dim=self.in_channels,
                                 out_dim=self.hidden_channels,
                                 relation_num=self.relation_num)
+        
+        # 【新增】：为输入图卷积添加 BatchNorm1d
+        self.bn_input = nn.BatchNorm1d(self.hidden_channels)
+        
         self.down_convs = nn.ModuleList()
         self.pools = nn.ModuleList()
+        self.bns = nn.ModuleList()  # 【新增】：为每一层隐藏图卷积添加 BatchNorm1d
+        
         for i in range(self.depth):
             self.pools.append(LGMVPool(channels, self.pool_ratios[i], 0.3))
             self.down_convs.append(relationGCN(in_dim=self.hidden_channels, out_dim=self.hidden_channels, relation_num=self.relation_num))
+            self.bns.append(nn.BatchNorm1d(self.hidden_channels))  # 【新增】
 
         # build reconstruction
         # in_channels = channels if sum_res else 2 * channels
@@ -83,9 +90,10 @@ class LGUNet_rela(torch.nn.Module):
             edge_attr = x.new_ones(edge_index.size(1))
 
         new_x, edge_index, new_edge_attr = self.input_layer(x, edge_index, edge_attr)
-        # edge_weight = new_edge_attr[:, 0]
         edge_weight = new_edge_attr
-        x = self.act(new_x)
+        
+        new_x = self.bn_input(new_x)  # 【新增】：过 BN 层
+        x = self.act(new_x)           # 激活
 
         xs = [x]
         edge_indices = [edge_index]
@@ -96,8 +104,11 @@ class LGUNet_rela(torch.nn.Module):
         for i in range(self.depth):
             x, edge_index, edge_weight, perm, batch = self.pools[i](x, edge_index, edge_weight, label_emb, batch)
             x, edge_index, edge_weight = self.down_convs[i](x, edge_index, edge_weight)
-            x = F.dropout(x, training=self.training, p=0.5)
-            x = self.act(x)
+            
+            x = self.bns[i](x)        # 【新增】：在卷积计算后，立刻过 BN 层
+            
+            x = F.dropout(x, training=self.training, p=0.5)  # Dropout 放 BN 后
+            x = self.act(x)           # 激活
 
         xs += [x]
         edge_indices += [edge_index]
@@ -108,7 +119,8 @@ class LGUNet_rela(torch.nn.Module):
         x_cl=[]
         for x in xs:
             glob_x = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
-            x_cl.append(F.relu(glob_x))
+            # 过拟合测试：去掉F.relu
+            x_cl.append((glob_x))
         x_cl = sum(x_cl)
 
         # 主任务：认知能力预测

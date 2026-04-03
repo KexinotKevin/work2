@@ -20,22 +20,38 @@ conda activate gnn_work2
 # --min_lr: 最小学习率（默认1e-6）
 # --warmup_epochs: 预热epoch数（默认5）
 
+# debug
 python run.py --use_dataset_cfg \
-    --num_epochs 50 \
+    --num_epochs 200 \
     --dataset_name S1200 \
     --atlas_name schaefer200_S1 \
     --sc_kinds FA fiber_count \
     --fc_kind pcc_rest \
-    --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
-    --output_root ./debug_results/test_thr_avail \
+    --label_types 'CogFluidComp_Unadj' \
+    --output_root ./debug_results/debug_overfit \
     --depth 2 \
-    --learning_rate 0.0001 \
-    --use_early_stopping \
-    --use_dynamic_lr \
-    --lr_patience 10 \
-    --lr_factor 0.5 \
-    --min_lr 1e-6 \
-    --warmup_epochs 5
+    --learning_rate 0.0005 \
+    --dropout 0.3 \
+    --l2_penalty 0.001 \
+    --use_early_stopping
+
+# python run.py --use_dataset_cfg \
+#     --num_epochs 50 \
+#     --dataset_name S1200 \
+#     --atlas_name schaefer200_S1 \
+#     --sc_kinds FA fiber_count \
+#     --fc_kind pcc_rest \
+#     --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
+#     --output_root ./debug_results/test_thr_avail \
+#     --no_normalize_labels \
+#     --use_early_stopping \
+#     --pool_ration [1,1,1] \
+#     --disable_grl \
+#     --use_dynamic_lr \
+#     --lr_patience 10 \
+#     --lr_factor 0.5 \
+#     --min_lr 1e-6 \
+#     --warmup_epochs 5
 
 # 【禁用规范化且使用动态学习率示例】
 # python run.py --use_dataset_cfg \
