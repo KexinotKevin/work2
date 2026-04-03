@@ -22,12 +22,13 @@ conda activate gnn_work2
 
 python run.py --use_dataset_cfg \
     --num_epochs 50 \
-    --dataset_name ABCD \
+    --dataset_name S1200 \
     --atlas_name schaefer200_S1 \
     --sc_kinds FA fiber_count \
     --fc_kind pcc_rest \
-    --label_types 'nihtbx_fluidcomp_uncorrected','nihtbx_cryst_uncorrected','nihtbx_totalcomp_uncorrected' \
-    --output_root ./results_full_schaefer200_S1 \
+    --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
+    --output_root ./debug_results/test_thr_avail \
+    --depth 2 \
     --use_early_stopping \
     --use_dynamic_lr \
     --lr_patience 10 \

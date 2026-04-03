@@ -56,6 +56,7 @@ class dataset():
         sc_kind="fiber_count",
         sc_kinds=None,
         fc_kind="pcc_rest",
+        output_dir=None,
     ):
         super().__init__()
         self.dsDir = "/public/home/baitianyu/kexin/datasets/"
@@ -70,6 +71,7 @@ class dataset():
         self.subject_col = "Subject"
         self.Isheader = False
         self.use_cfg_layout = False
+        self.output_dir = output_dir
 
     def dspath_configuration(self, dsType):
         if self.use_dataset_cfg:
@@ -141,7 +143,8 @@ class dataset():
                                   use_cfg_layout=self.use_cfg_layout,
                                   atlas_name=self.atlas_name,
                                   gender_col=self.gender_col,
-                                  age_col=self.age_col)
+                                  age_col=self.age_col,
+                                  output_dir=self.output_dir)
         
         train_size = int(split_ratio[0] * len(self.datalist))
         # print(train_size)

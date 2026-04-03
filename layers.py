@@ -427,5 +427,5 @@ class LGMVPool(nn.Module):
         return x, new_edge_index, new_edge_attr, perm, batch
 
     def _calc_pagerank(self, x, edge_index, edge_weight, num_nodes):
-        self.cal_pr = PageRankScore(channels=x.size(0))
+        self.cal_pr = PageRankScore(channels=x.size(0),k=3)
         return self.cal_pr(x, edge_index, edge_weight, num_nodes, num_relations=1)

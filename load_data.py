@@ -6,6 +6,7 @@ import os.path as osp
 import torch
 from torch_geometric.data import data as D
 import os
+from threshold_func import threshold_consistency
         
 def load_connectivity_matrix(filename, isheader=False):
     try:
@@ -104,6 +105,7 @@ def load_data(
     atlas_name=None,
     gender_col=None,
     age_col=None,
+    output_dir=None,
 ):
     def process_age(val):
         """处理异质性年龄格式：S1200区间型、ABCD整型、HCD连续型"""
@@ -134,7 +136,7 @@ def load_data(
     atlas_tag = atlas_name if atlas_name else "default"
     sc_tag = "-".join(sc_netnames)
     # Bump cache tag when node feature layout changes (old caches used N×N identity).
-    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}_nx1.pt".replace("/", "_")
+    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}_thr75.pt".replace("/", "_")
     cache_path = osp.join(netDir, cache_filename)
 
     graph_dict = {}
@@ -144,7 +146,6 @@ def load_data(
     else:
         print(">>> No cache found. Parsing massive raw CSVs (This will only happen ONCE)...")
     new_graphs_processed = False
-    # =========================================================================
 
     sc_channel_count = len(sc_netnames)
     graph_list = []
@@ -164,37 +165,29 @@ def load_data(
             subj = str(row[subject_col])
             gender_map[subj] = process_gender(row[gender_col])
 
-    for k in range(dt.shape[0]):
-        subj = str(dt[subject_col][k])
-        if subj in subjlist_set:
-            # ABCD dataset: labelfile 中是 NDAR_XXXXX，但 netDir 里是 NDARXXXXX
-            subj_for_file = subj.replace("NDAR_", "NDAR") if subj.startswith("NDAR_") else subj
+    # ==================== 【核心新增：两阶段图构建与一致性阈值过滤】 ====================
+    if not graph_dict:
+        raw_mats_list = []
+        # --- 阶段 1：加载全组受试者的原始矩阵 ---
+        for k in range(dt.shape[0]):
+            subj = str(dt[subject_col][k])
+            if subj in subjlist_set:
+                subj_for_file = subj.replace("NDAR_", "NDAR") if subj.startswith("NDAR_") else subj
 
-            # ==================== 【核心新增 2：命中缓存则跳过 CSV 解析】 ====================
-            if subj in graph_dict:
-                g_data = graph_dict[subj]
-                # 为缓存数据挂载协变量（确保 GRL 分支正常工作）
-                g_data.age = torch.tensor([age_map.get(subj, 0.0)], dtype=g_data.x.dtype)
-                g_data.gender = torch.tensor([gender_map.get(subj, 0.0)], dtype=g_data.x.dtype)
-            else:
-                # ------ 下面完全是你原封不动的 CSV 解析和图构建逻辑 ------
+                # 读取矩阵的原始逻辑
                 if use_cfg_layout:
                     if not atlas_name:
                         raise ValueError("atlas_name is required when use_cfg_layout=True.")
-                    sc_mats = []
-                    missing_sc = False
+                    sc_mats, missing_sc = [], False
                     for sc_name in sc_netnames:
                         sc_base = osp.join(netDir, atlas_name, subj_for_file, "SC", sc_name)
                         sc_path = _resolve_conn_file(sc_base)
                         if sc_path is None:
-                            missing_sc = True
-                            break
+                            missing_sc = True; break
                         sc_mats.append(load_connectivity_matrix(sc_path, isheader=True))
-
                     fc_base = osp.join(netDir, atlas_name, subj_for_file, "FC", fc_netname)
                     fc_path = _resolve_conn_file(fc_base)
-                    if missing_sc or fc_path is None:
-                        continue
+                    if missing_sc or fc_path is None: continue
                     fc_mat = load_connectivity_matrix(fc_path, isheader=True)
                 else:
                     matname = '{}.csv'.format(subj_for_file)
@@ -202,64 +195,85 @@ def load_data(
                     sc_mats = [sc_mat]
                     fc_mat = load_connectivity_matrix(osp.join(netDir, fc_netname, matname), isheader=Isheader)
 
-                if fc_mat.shape[0] != fc_mat.shape[1]:
-                    print(
-                        f"[load_data] skip subject {subj}: FC matrix not square, shape {fc_mat.shape}"
-                    )
-                    continue
-                n_nodes = int(fc_mat.shape[0])
-                sc_mismatch = False
-                for idx, sm in enumerate(sc_mats):
-                    if sm.shape != (n_nodes, n_nodes):
-                        print(
-                            f"[load_data] skip subject {subj}: SC[{idx}] shape {sm.shape} != FC ({n_nodes},{n_nodes})"
-                        )
-                        sc_mismatch = True
-                        break
-                if sc_mismatch:
-                    continue
+                if fc_mat.shape[0] != fc_mat.shape[1]: continue
+                raw_mats_list.append({'subj': subj, 'sc_mats': sc_mats, 'fc_mat': fc_mat})
 
+        # --- 阶段 2：计算组水平的变异系数阈值掩码 (p=0.75) ---
+        if raw_mats_list:
+            n_nodes = raw_mats_list[0]['fc_mat'].shape[0]
+            num_sc = len(raw_mats_list[0]['sc_mats'])
+            global_mask = np.zeros((n_nodes, n_nodes), dtype=bool)
+
+            print(">>> Calculating group consistency threshold (p=0.75)...")
+            # 处理所有 SC
+            W_thr_sc_list = []
+            for sc_idx in range(num_sc):
+                Ws_sc = np.stack([rm['sc_mats'][sc_idx] for rm in raw_mats_list], axis=2)
+                W_thr_sc = threshold_consistency(Ws_sc, 0.75)
+                global_mask |= (W_thr_sc != 0)
+                W_thr_sc_list.append(W_thr_sc)
+
+            # 处理 FC
+            Ws_fc = np.stack([rm['fc_mat'] for rm in raw_mats_list], axis=2)
+            W_thr_fc = threshold_consistency(Ws_fc, 0.75)
+            global_mask |= (W_thr_fc != 0)
+
+            # --- 保存阈值处理相关数据到实验结果目录 ---
+            if output_dir is not None:
+                os.makedirs(output_dir, exist_ok=True)
+                np.save(osp.join(output_dir, "thr_global_mask.npy"), global_mask.astype(np.uint8))
+                np.save(osp.join(output_dir, "thr_fc.npy"), W_thr_fc)
+                for sc_idx, W_thr_sc in enumerate(W_thr_sc_list):
+                    np.save(osp.join(output_dir, f"thr_sc_{sc_idx}.npy"), W_thr_sc)
+                print(f">>> Thresholding data saved to {output_dir}")
+
+            # --- 阶段 3：使用阈值掩码构建稀疏的 PyG Graph ---
+            print(">>> Building sparse PyG Data objects with Thresholding Mask...")
+            for rm in raw_mats_list:
+                subj, sc_mats, fc_mat = rm['subj'], rm['sc_mats'], rm['fc_mat']
                 feat = torch.tensor(get_node_feature(n_nodes))
-                edge_in = []
-                edge_out = []
-                edge_attr_l = []
+                edge_in, edge_out, edge_attr_l = [], [], []
 
-                for i in range(len(fc_mat[0])):
-                    for j in range(i, len(fc_mat[0])):
-                        edge_in.append(i)
-                        edge_out.append(j)
-                        edge_attr = []
-                        for sc_mat_item in sc_mats:
-                            edge_attr.append(sc_mat_item[i][j] if i != j else 0)
-                        edge_attr.append(fc_mat[i][j] if fc_mat[i][j]>0 else 0)
-                        edge_attr.append(abs(fc_mat[i][j]) if fc_mat[i][j]<0 else 0)
-                        edge_attr_l.append(edge_attr)
+                for i in range(n_nodes):
+                    for j in range(i, n_nodes):
+                        # 【核心修改】只保留一致性阈值过滤后的边（自环永远保留）
+                        if global_mask[i, j] or global_mask[j, i] or i == j:
+                            edge_in.append(i)
+                            edge_out.append(j)
+                            edge_attr = []
+                            for sc_mat_item in sc_mats:
+                                edge_attr.append(sc_mat_item[i][j] if i != j else 0)
+                            edge_attr.append(fc_mat[i][j] if fc_mat[i][j]>0 else 0)
+                            edge_attr.append(abs(fc_mat[i][j]) if fc_mat[i][j]<0 else 0)
+                            edge_attr_l.append(edge_attr)
+
                 edge_attr = torch.tensor(edge_attr_l, dtype=feat.dtype, device=feat.device)
-                
-                # normalization
-                for i in range(len(edge_attr_l[0])):
-                    denom = torch.sum(edge_attr[:, i])
-                    if denom > 0:
-                        edge_attr[:, i] = edge_attr[:, i] / denom
-                
+
+                # 【修复核心 Bug】使用 max 而非 sum，防止边权重被稀释到 0
+                for i in range(edge_attr.size(1)):
+                    max_val = torch.max(torch.abs(edge_attr[:, i]))
+                    if max_val > 0:
+                        edge_attr[:, i] = edge_attr[:, i] / max_val
+
                 g_data = D.Data()
                 g_data.x, g_data.edge_index, g_data.edge_attr = feat, torch.tensor([edge_in, edge_out]), edge_attr
-                # 挂载人口学协变量（供 GRL 对抗分支使用）
-                g_data.age = torch.tensor([age_map.get(subj, 0.0)], dtype=feat.dtype)
-                g_data.gender = torch.tensor([gender_map.get(subj, 0.0)], dtype=feat.dtype)
-                # ------ 原有 CSV 解析逻辑结束 ------
-                
-                # 将处理好的纯结构图存入字典
                 graph_dict[subj] = g_data
                 new_graphs_processed = True
-            # =========================================================================
 
-            # 【动态分配当前任务的 Label】（无论来自缓存还是刚处理完，都在这里挂载标签）
+    # --- 阶段 4：为 Data 挂载当前的 Label 和 协变量 ---
+    for k in range(dt.shape[0]):
+        subj = str(dt[subject_col][k])
+        if subj in subjlist_set and subj in graph_dict:
+            g_data = graph_dict[subj]
+            g_data.age = torch.tensor([age_map.get(subj, 0.0)], dtype=g_data.x.dtype)
+            g_data.gender = torch.tensor([gender_map.get(subj, 0.0)], dtype=g_data.x.dtype)
+
             lb = torch.tensor(lb_map[k], dtype=g_data.x.dtype, device=g_data.x.device)
             if ifBucket:
                 graph_list.append((g_data, torch.Tensor(label_bucketization(lb))))
             else:
                 graph_list.append((g_data, lb))
+    # ==================== 两阶段逻辑结束 ====================
 
     # ==================== 【核心新增 3：将新生成的图字典落盘】 ====================
     if new_graphs_processed:

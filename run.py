@@ -127,8 +127,9 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             loss_gender = F.binary_cross_entropy_with_logits(out_gender.squeeze(-1), g_data.gender.squeeze(-1).to(device))
 
             # ====== 【修復 2：增加對抗任務權重，防止喧賓奪主】 ======
-            # GRL 是一種強正則化，權重 (adv_weight) 通常設為 0.01 ~ 0.1 之間
-            adv_weight = 0.05 
+            # 【修改】：因为预测 Unadj（未调整分数），年龄是极其重要的特征
+            # 不能用 0.05 强行抹除，将其降至 0.001 仅做微弱正则化
+            adv_weight = 0.001 
             loss = loss_cog + adv_weight * (loss_age + loss_gender)
 
             loss.backward()
@@ -495,6 +496,7 @@ def main():
             sc_kind=args.sc_kind,
             sc_kinds=args.sc_kinds,
             fc_kind=args.fc_kind,
+            output_dir=label_output_dir,
         )
         dt.setsubset(
             labelType=args.label_type,
