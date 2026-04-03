@@ -118,19 +118,25 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             # 主任務損失：讓模型去擬合標準化後的標籤
             loss_cog = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data_norm)
 
-            # ====== 【修復 1：歸一化年齡標籤，防止 GRL 梯度爆炸】 ======
-            # 將數值除以 age_scale 壓縮到 0~1 附近，使其梯度量級與 loss_cog 對齊
-            age_labels = g_data.age.squeeze(-1).to(device) / age_scale
-            out_age_scaled = out_age.squeeze(-1) / age_scale
-            loss_age = F.smooth_l1_loss(out_age_scaled, age_labels)
-            
-            loss_gender = F.binary_cross_entropy_with_logits(out_gender.squeeze(-1), g_data.gender.squeeze(-1).to(device))
+            # ======== 修改开始 ========
+            if not getattr(args, 'disable_grl', False):
+                # ====== 【修復 1：歸一化年齡標籤，防止 GRL 梯度爆炸】 ======
+                # 將數值除以 age_scale 壓縮到 0~1 附近，使其梯度量級與 loss_cog 對齊
+                age_labels = g_data.age.squeeze(-1).to(device) / age_scale
+                out_age_scaled = out_age.squeeze(-1) / age_scale
+                loss_age = F.smooth_l1_loss(out_age_scaled, age_labels)
+                
+                loss_gender = F.binary_cross_entropy_with_logits(out_gender.squeeze(-1), g_data.gender.squeeze(-1).to(device))
 
-            # ====== 【修復 2：增加對抗任務權重，防止喧賓奪主】 ======
-            # 【修改】：因为预测 Unadj（未调整分数），年龄是极其重要的特征
-            # 不能用 0.05 强行抹除，将其降至 0.001 仅做微弱正则化
-            adv_weight = 0.001 
-            loss = loss_cog + adv_weight * (loss_age + loss_gender)
+                # ====== 【修復 2：增加對抗任務權重，防止喧賓奪主】 ======
+                # 【修改】：因为预测 Unadj（未调整分数），年龄是极其重要的特征
+                # 不能用 0.05 强行抹除，将其降至 0.001 仅做微弱正则化
+                adv_weight = 0.001 
+                loss = loss_cog + adv_weight * (loss_age + loss_gender)
+            else:
+                # 关闭GRL时，仅使用主任务loss
+                loss = loss_cog
+            # ======== 修改结束 ========
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
@@ -437,6 +443,12 @@ def parse_args():
                         help="Restore best model weights when early stopping triggers")
     parser.add_argument("--early_stopping_no_restore_best", action="store_false", dest="early_stopping_restore_best",
                         help="Do not restore best model weights when early stopping triggers")
+    
+    # ======== 修改开始 ========
+    parser.add_argument("--disable_grl", action="store_true", default=False,
+                        help="Disable GRL adversarial training for ablation studies")
+    # ======== 修改结束 ========
+    
     return parser.parse_args()
 
 

@@ -29,6 +29,7 @@ python run.py --use_dataset_cfg \
     --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
     --output_root ./debug_results/test_thr_avail \
     --depth 2 \
+    --learning_rate 0.0001 \
     --use_early_stopping \
     --use_dynamic_lr \
     --lr_patience 10 \

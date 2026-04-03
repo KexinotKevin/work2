@@ -36,20 +36,25 @@ class LGUNet_rela(torch.nn.Module):
         self.lin2 = torch.nn.Linear(self.hidden_channels, self.hidden_channels // 2)
         self.lin3 = torch.nn.Linear(self.hidden_channels // 2, 1)
 
-        # GRL 对抗分支：年龄预测器
-        self.age_predictor = nn.Sequential(
-            nn.Linear(self.hidden_channels * 2, self.hidden_channels),
-            nn.ReLU(),
-            nn.Dropout(p=self.drop),
-            nn.Linear(self.hidden_channels, 1)
-        )
-        # GRL 对抗分支：性别分类器
-        self.gender_predictor = nn.Sequential(
-            nn.Linear(self.hidden_channels * 2, self.hidden_channels),
-            nn.ReLU(),
-            nn.Dropout(p=self.drop),
-            nn.Linear(self.hidden_channels, 1)
-        )
+        # ======== 修改开始 ========
+        # GRL 对抗分支：添加外部开关
+        self.use_grl = not getattr(args, 'disable_grl', False)
+        
+        if self.use_grl:
+            self.age_predictor = nn.Sequential(
+                nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(p=self.drop),
+                nn.Linear(self.hidden_channels, 1)
+            )
+            # GRL 对抗分支：性别分类器
+            self.gender_predictor = nn.Sequential(
+                nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(p=self.drop),
+                nn.Linear(self.hidden_channels, 1)
+            )
+        # ======== 修改结束 ========
 
         channels = self.hidden_channels
 
@@ -113,10 +118,15 @@ class LGUNet_rela(torch.nn.Module):
         out_cog = F.dropout(out_cog, p=self.drop, training=self.training)
         out_cog = self.lin3(out_cog)
 
+        # ======== 修改开始 ========
         # 对抗任务：年龄与性别预测（通过 GRL 反转梯度）
-        x_reversed = GradientReversalLayer.apply(x_cl, 1.0)
-        out_age = self.age_predictor(x_reversed)
-        out_gender = self.gender_predictor(x_reversed)
+        if self.use_grl:
+            x_reversed = GradientReversalLayer.apply(x_cl, 1.0)
+            out_age = self.age_predictor(x_reversed)
+            out_gender = self.gender_predictor(x_reversed)
+        else:
+            out_age, out_gender = None, None
+        # ======== 修改结束 ========
 
         self.saved_edge_weights = edge_weights
         return out_cog, out_age, out_gender
