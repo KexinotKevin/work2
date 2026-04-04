@@ -2,10 +2,13 @@
 .vscode
 *result*
 old_*
-*data*
-*baseline_models*
+dataset*
 
 *ignore*
 *plots*
-*.tex
 *gitignore*
+*.png
+*.pdf
+*.csv
+*.ckpt
+*.pth*
