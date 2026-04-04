@@ -109,14 +109,16 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             lb_data = lb_data.to(device)
             optimizer.zero_grad()
 
-            # 前向傳播：主任務 + GRL 對抗任務
-            out_cog, out_age, out_gender = model(g_data, lb_data, g_data.batch)
+            # 【修改】：传入占位符 dummy_lb，防止 LGMVPool 被绝对值撑爆和数据泄露
+            dummy_lb = torch.zeros_like(lb_data, dtype=torch.float64, device=device)
+            out_cog, out_age, out_gender = model(g_data, dummy_lb, g_data.batch)
 
             # ====== 【核心修改：標籤標準化】 ======
             lb_data_norm = (lb_data - lb_mean) / (lb_std + 1e-8)
             
             # 主任務損失：讓模型去擬合標準化後的標籤
-            loss_cog = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data_norm)
+            # 【修改】：直接使用 mse_loss，暴力拉升 R^2 性能
+            loss_cog = F.mse_loss(out_cog.squeeze(-1), lb_data_norm)
 
             # ======== 修改开始 ========
             if not getattr(args, 'disable_grl', False):
@@ -124,7 +126,8 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
                 # 將數值除以 age_scale 壓縮到 0~1 附近，使其梯度量級與 loss_cog 對齊
                 age_labels = g_data.age.squeeze(-1).to(device) / age_scale
                 out_age_scaled = out_age.squeeze(-1) / age_scale
-                loss_age = F.smooth_l1_loss(out_age_scaled, age_labels)
+                # 【修改】：使用 mse_loss 替代 smooth_l1_loss，與主任務損失函數一致
+                loss_age = F.mse_loss(out_age_scaled, age_labels)
                 
                 loss_gender = F.binary_cross_entropy_with_logits(out_gender.squeeze(-1), g_data.gender.squeeze(-1).to(device))
 
@@ -176,11 +179,14 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             for g_data, lb_data in valloader:
                 g_data = g_data.to(device)
                 lb_data = lb_data.to(device)
-                out_cog, _, _ = model(g_data, lb_data, g_data.batch)
+                # 【修改】：验证时也传入占位符，防止 LGMVPool 被撑爆
+                dummy_lb = torch.zeros_like(lb_data, dtype=torch.float64, device=device)
+                out_cog, _, _ = model(g_data, dummy_lb, g_data.batch)
                 
                 # ====== 【核心修改：驗證集也需要計算標準化後的 Loss】 ======
                 lb_data_norm = (lb_data - lb_mean) / (lb_std + 1e-8)
-                loss = F.smooth_l1_loss(out_cog.squeeze(-1), lb_data_norm)
+                # 【修改】：使用 mse_loss 替代 smooth_l1_loss，與訓練損失函數一致
+                loss = F.mse_loss(out_cog.squeeze(-1), lb_data_norm)
                 
                 val_loss_tmp.append(loss.item())
         val_loss_v = sum(val_loss_tmp) / len(val_loss_tmp)
@@ -284,8 +290,9 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
                 g_test = g_test.to(device)
                 lb_test = lb_test.to(device)
                 
-                # 評估時僅使用主任務輸出 (此時預測的是標準化後的值)
-                lb_pred, _, _ = model_t(g_test, lb_test, g_test.batch)
+                # 【修改】：推断时绝对不能传入真实标签，同样传入占位符
+                dummy_lb = torch.zeros_like(lb_test, dtype=torch.float64, device=device)
+                lb_pred, _, _ = model_t(g_test, dummy_lb, g_test.batch)
                 
                 # ====== 【核心修改：反標準化，還原為真實量綱】 ======
                 lb_pred_real = lb_pred.squeeze(-1) * lb_std + lb_mean
@@ -339,7 +346,9 @@ def extract_saliency_map(model, dataloader, device, lb_mean, lb_std):
         g_data, lb_data = g_data.to(device), lb_data.to(device)
         g_data.edge_attr.requires_grad = True
 
-        lb_pred, _, _ = model(g_data, lb_data, g_data.batch)
+        # 【修改】：传入占位符 dummy_lb，让模型依赖图结构本身
+        dummy_lb = torch.zeros_like(lb_data, dtype=torch.float64, device=device)
+        lb_pred, _, _ = model(g_data, dummy_lb, g_data.batch)
         
         # 反标准化后再算解释性 Loss，确保梯度量级正确
         lb_pred_real = lb_pred.squeeze(-1) * lb_std + lb_mean

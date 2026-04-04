@@ -412,15 +412,16 @@ class LGMVPool(nn.Module):
             tmp_wt = new_edge_attr[:, i]
             tmp_act_wt = self.lamb * tmp_wt + F.leaky_relu(weights, self.negative_slop)
             
-            # 1. 使用 .clone() 避免 Sparsemax 内部的 in-place 操作报错
-            # 2. 使用 .to(...) 替代 torch.tensor(...) 保持梯度图连接，消灭 Warning
-            sparsed_attr = self.sparse_attention(tmp_act_wt.clone(), row).to(tmp_act_wt.dtype)
+            # 【核心修复1】：弃用暴力的 Sparsemax，改用 PyG 原生的 softmax
+            # softmax 不会输出绝对的 0，完美保护梯度流和图连通性
+            sparsed_attr = softmax(tmp_act_wt.clone(), row).to(tmp_act_wt.dtype)
             new_attr_list.append(sparsed_attr)
 
         new_edge_attr = torch.stack(new_attr_list, dim=1)
 
-        # 过滤掉 relation 0 中权重为 0 的边 (与原版 adj[:, :, 0] != 0 的语义严格保持一致)
-        mask = new_edge_attr[:, 0] != 0
+        # 【核心修复2】：只要任何一个模态(FA, FC等)的权重有效，就保留这条边！
+        # 避免仅因为 FA 被判定不重要，就误删了拥有极强 FC 信号的连接
+        mask = (new_edge_attr > 1e-6).any(dim=1)
         new_edge_index = new_edge_index[:, mask]
         new_edge_attr = new_edge_attr[mask]
 

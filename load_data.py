@@ -20,13 +20,17 @@ def load_connectivity_matrix(filename, isheader=False):
         ) from e
     return mat
 
-def get_node_feature(num_nodes):
-    """Constant 1-D per-node features so PyG can batch graphs with different node counts.
-
-    Previously an N×N identity was used, which makes feature dimension equal to N; then any
-    subject whose connectivity matrix is not N×N (e.g. 215 vs 216) breaks Batch.from_data_list.
+def get_node_feature(num_nodes,max_nodes=300):
     """
-    return np.eye(num_nodes, dtype=np.float64)
+    【核心修复】：使用固定维度 (300) 的 One-hot 编码。
+    1. 赋予每个脑区独立的身份标识，打破 GNN 的节点同质化。
+    2. 固定特征维度为 300，完美解决不同被试节点数 (N) 不同导致的 PyG Batch 拼接报错。
+    """
+    feat = np.zeros((num_nodes, max_nodes), dtype=np.float64)
+    for i in range(num_nodes):
+        if i < max_nodes:
+            feat[i, i] = 1.0  # 对角线置 1，形成身份编码
+    return feat
 
 def label_bucketization(value):
     buckets = [(0, 90), (90, 100), (100, 110), (110, 120), (120, 130), (130, 140), (140, 150), (150, float('inf'))]
@@ -135,8 +139,8 @@ def load_data(
     # ==================== 【核心新增 1：初始化磁盘缓存机制】 ====================
     atlas_tag = atlas_name if atlas_name else "default"
     sc_tag = "-".join(sc_netnames)
-    # Bump cache tag when node feature layout changes (old caches used N×N identity).
-    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}_thr75.pt".replace("/", "_")
+    # Bump cache tag when node feature layout changes (old caches used N×N identity, now uses fixed 300-dim one-hot).
+    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}_thr75_feat300.pt".replace("/", "_")
     cache_path = osp.join(netDir, cache_filename)
 
     graph_dict = {}
@@ -144,7 +148,7 @@ def load_data(
         print(f">>> Loading cached graph structures from {cache_path} (Super Fast!)...")
         graph_dict = _torch_load_graph_cache(cache_path)
         # for debug
-        graph_dict = dict(sorted(graph_dict.items(), key=lambda x: x[0], reverse=True)[:300])
+        # graph_dict = dict(sorted(graph_dict.items(), key=lambda x: x[0], reverse=True)[:300])
     else:
         print(">>> No cache found. Parsing massive raw CSVs (This will only happen ONCE)...")
     new_graphs_processed = False
@@ -213,8 +217,9 @@ def load_data(
             for sc_idx in range(num_sc):
                 Ws_sc = np.stack([rm['sc_mats'][sc_idx] for rm in raw_mats_list], axis=2)
                 
-                # 【新增】：提取该 SC 特征在所有受试者中的全局最大绝对值
-                global_sc_max.append(np.max(np.abs(Ws_sc)))
+                # 【修改】：使用 99% 分位数代替绝对最大值，防止极端伪影碾压全局权重
+                safe_max = np.percentile(np.abs(Ws_sc), 99.0)
+                global_sc_max.append(safe_max if safe_max > 0 else 1.0)
                 
                 W_thr_sc = threshold_consistency(Ws_sc, 0.75)
                 global_mask |= (W_thr_sc != 0)
@@ -259,9 +264,8 @@ def load_data(
                 # ===================== 【新代码】全局归一化 + Fisher Z 变换 =====================
                 for i in range(edge_attr.size(1)):
                     if i < num_sc:
-                        # 对于 SC 特征（如 FA, fiber_count），除以对应通道的【全局最大值】
-                        if global_sc_max[i] > 0:
-                            edge_attr[:, i] = edge_attr[:, i] / global_sc_max[i]
+                        # 【修改】：使用 99% 分位数归一化，并加入 clamp 防止极端值溢出
+                        edge_attr[:, i] = torch.clamp(edge_attr[:, i] / global_sc_max[i], max=1.0)
                     else:
                         # 对于 FC 特征（原代码已分离为正相关和负相关的绝对值，区间为 [0, 1]）
                         # 使用 Fisher Z 变换展开分布: 0.5 * ln((1+r)/(1-r))
