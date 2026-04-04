@@ -7,6 +7,10 @@ conda activate gnn_work2
 
 export PYTHONPATH="$(pwd)/../../":$PYTHONPATH
 
+# 生成共享时间戳，所有模型的结果保存到同一文件夹
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OUTPUT_ROOT="../results/debug_baseline_no_grl/${TIMESTAMP}"
+
 MODELS=("GCN" "GAT" "SAGE" "RelGNN")
 MODALITIES=("SC" "FC" "SC_FC")
 
@@ -18,7 +22,7 @@ for MODEL in "${MODELS[@]}"; do
             continue
         fi
 
-        echo ">>> Running Baseline | Model: ${MODEL} | Modality: ${MOD} <<<"
+        echo ">>> Running Baseline | Model: ${MODEL} | Modality: ${MOD} | Timestamp: ${TIMESTAMP} <<<"
         
         python run_baseline.py \
             --model_type ${MODEL} \
@@ -30,8 +34,10 @@ for MODEL in "${MODELS[@]}"; do
             --num_nodes 216 \
             --sc_kinds FA \
             --fc_kind pcc_rest \
-            --label_types 'CogFluidComp_Unadj' \
-            --output_root ../results/debug_baseline/${MODEL}_${MOD} \
+            --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
+            --output_root ${OUTPUT_ROOT} \
+            --timestamp ${TIMESTAMP} \
+            --disable_grl \
             --seed 42 \
             --use_early_stopping
             

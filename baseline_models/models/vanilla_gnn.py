@@ -7,6 +7,7 @@ import sys, os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../')))
 from layers import relationGCN
+from model_r import GradientReversalLayer
 
 
 class BaseGNN(nn.Module):
@@ -23,13 +24,41 @@ class BaseGNN(nn.Module):
         self.lin2 = nn.Linear(self.hidden_channels, self.hidden_channels // 2)
         self.lin3 = nn.Linear(self.hidden_channels // 2, 1)
 
+        # GRL 分支：可选的对抗预测器
+        self.use_grl = not getattr(args, 'disable_grl', False)
+        if self.use_grl:
+            self.age_predictor = nn.Sequential(
+                nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(p=self.drop),
+                nn.Linear(self.hidden_channels, 1)
+            )
+            self.gender_predictor = nn.Sequential(
+                nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(p=self.drop),
+                nn.Linear(self.hidden_channels, 1)
+            )
+
     def forward_readout(self, x, batch):
         glob_x = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
+
+        # 主任务：认知能力预测
         out_cog = F.leaky_relu(self.lin1(glob_x), negative_slope=0.1)
         out_cog = F.dropout(out_cog, p=self.drop, training=self.training)
         out_cog = F.leaky_relu(self.lin2(out_cog), negative_slope=0.1)
         out_cog = F.dropout(out_cog, p=self.drop, training=self.training)
-        return self.lin3(out_cog), None, None
+        out_cog = self.lin3(out_cog)
+
+        # 对抗任务：通过 GRL 反转梯度
+        if self.use_grl:
+            x_reversed = GradientReversalLayer.apply(glob_x, 1.0)
+            out_age = self.age_predictor(x_reversed)
+            out_gender = self.gender_predictor(x_reversed)
+        else:
+            out_age, out_gender = None, None
+
+        return out_cog, out_age, out_gender
 
 
 class VanillaGCN(BaseGNN):
