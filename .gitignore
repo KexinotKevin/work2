@@ -5,10 +5,11 @@ old_*
 dataset*
 
 *ignore*
-*plots*
+*plot*
 *gitignore*
 *.png
 *.pdf
 *.csv
 *.ckpt
 *.pth*
+*U-Net*
