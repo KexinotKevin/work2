@@ -142,7 +142,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             # ======== 修改结束 ========
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=20.0)
             
             # 记录梯度范数（用于动态学习率调整）
             total_grad_norm = 0.0
@@ -269,11 +269,10 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
 
 
 # 注意：函數簽名增加了 age_scale
-def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale=100.0):
-    model_t = torch.load(
-        os.path.join(label_output_dir, "best_validation.pth"),
-        weights_only=False,
-    ).to(device)
+# checkpoint_path: 若指定则从该路径加载权重；否则从 label_output_dir/best_validation.pth 加载（训练流程）
+def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale=100.0, checkpoint_path=None):
+    ckpt = checkpoint_path if checkpoint_path is not None else os.path.join(label_output_dir, "best_validation.pth")
+    model_t = torch.load(ckpt, weights_only=False).to(device)
     model_t.eval()
 
     from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
@@ -547,7 +546,7 @@ def main():
         print("dataset is okay for label: {}".format(label))
 
         model = LGUNet_rela(args).to(device)
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
         )
         

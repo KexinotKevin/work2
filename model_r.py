@@ -120,9 +120,9 @@ class LGUNet_rela(torch.nn.Module):
         x_cl = sum(x_cl)
 
         # 主任务：认知能力预测
-        out_cog = F.relu(self.lin1(x_cl))
+        out_cog = F.leaky_relu(self.lin1(x_cl),negative_slope=0.1)
         out_cog = F.dropout(out_cog, p=self.drop, training=self.training)
-        out_cog = F.relu(self.lin2(out_cog))
+        out_cog = F.leaky_relu(self.lin2(out_cog),negative_slope=0.1)
         out_cog = F.dropout(out_cog, p=self.drop, training=self.training)
         out_cog = self.lin3(out_cog)
 

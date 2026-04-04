@@ -28,12 +28,13 @@ python run.py --use_dataset_cfg \
     --sc_kinds FA fiber_count \
     --fc_kind pcc_rest \
     --label_types 'CogFluidComp_Unadj' \
-    --output_root ./debug_results/debug_onehot \
+    --output_root ./debug_results/debug_adamw \
     --depth 2 \
     --input_dimension 300 \
+    --hidden_dimension 64 \
     --learning_rate 0.0005 \
-    --dropout 0.0 \
-    --l2_penalty 0.0 \
+    --dropout 0.4 \
+    --l2_penalty 0.01 \
     --use_early_stopping
 
 # python run.py --use_dataset_cfg \
