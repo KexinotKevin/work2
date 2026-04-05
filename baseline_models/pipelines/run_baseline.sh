@@ -9,10 +9,12 @@ export PYTHONPATH="$(pwd)/../../":$PYTHONPATH
 
 # 生成共享时间戳，所有模型的结果保存到同一文件夹
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_ROOT="../results/debug_baseline_no_grl/${TIMESTAMP}"
+OUTPUT_ROOT="../results/debug_baseline/${TIMESTAMP}"
 
-MODELS=("GCN" "GAT" "SAGE" "RelGNN")
-MODALITIES=("SC" "FC" "SC_FC")
+# MODELS=("GCN" "GAT" "SAGE" "RelGNN" "BrainGNN")
+MODELS=("BrainGNN")
+# MODALITIES=("SC" "FC" "SC_FC")
+MODALITIES=("SC" "FC")
 
 for MODEL in "${MODELS[@]}"; do
     for MOD in "${MODALITIES[@]}"; do
@@ -40,6 +42,5 @@ for MODEL in "${MODELS[@]}"; do
             --disable_grl \
             --seed 42 \
             --use_early_stopping
-            
     done
 done

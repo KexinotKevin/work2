@@ -10,6 +10,10 @@ from dataset import dataset
 from baseline_models.models.vanilla_gnn import VanillaGCN, VanillaGAT, VanillaSAGE, VanillaRelGNN
 from strategies import EarlyStopping
 
+# 导入 BrainGNN 源码
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../models/BrainGNN_Pytorch')))
+from net.braingnn import Network as BrainGNN
+
 
 def transform_batch(g_data, args, device):
     """Transforms raw graph data into Baseline format without modifying load_data.py.
@@ -52,6 +56,56 @@ def transform_batch(g_data, args, device):
         g_data.edge_attr = None
 
     return g_data
+
+
+# ==================== BrainGNN 适配器 ====================
+class BrainGNNWrapper(torch.nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        
+        # 【填坑 1：强制输入维度为 300】
+        # 匹配 load_data.py 里的 max_nodes=300 固定 One-hot 维度
+        real_input_dim = 300 
+        
+        self.model = BrainGNN(
+            indim=real_input_dim, 
+            ratio=0.5, 
+            nclass=args.output_dimension,  # 1
+            k=8, 
+            R=real_input_dim, 
+            mode='regression'
+        )
+        # main() 里 torch.set_default_dtype(float64) 会让 Linear 权重为 float64，
+        # 与 forward 里显式 .float() 的节点特征不一致，必须在子模块上强制 float32。
+        self.model = self.model.float()
+        self.use_grl = False
+
+    def forward(self, g_data, dummy_lb, batch):
+        # 【填坑 2：精度退回 Float32】
+        # 你的全局是 float64，但 BrainGNN 需要 float32
+        x_f32 = g_data.x.float()
+        
+        # 【填坑 3：消除多模态边特征的干扰】
+        # 如果有多通道 edge_attr (比如 FA 和 FC_pos)，BrainGNN 会崩溃
+        # 我们强行提取第 1 个通道 (通常是 SC/FA)，并转为 float32
+        if g_data.edge_attr is not None and g_data.edge_attr.dim() > 1:
+            edge_weight_f32 = g_data.edge_attr[:, 0].float()
+        else:
+            edge_weight_f32 = g_data.edge_attr.float() if g_data.edge_attr is not None else None
+
+        # 将节点 One-hot 特征当作其空间 pos 输入，完美契合你的身份编码逻辑
+        pos_f32 = x_f32
+
+        # 调用原生的 BrainGNN 前向传播
+        out = self.model(x_f32, g_data.edge_index, g_data.batch, edge_weight_f32, pos_f32)
+        
+        # BrainGNN 输出的是一个 Tuple，第一个元素是预测结果
+        pred = out[0] if isinstance(out, tuple) else out
+        
+        # 【填坑 4：精度升回 Float64】
+        # 传回给你自己的 Pipeline 计算 Loss，必须升回 float64 对齐真实标签
+        return pred.to(torch.float64), None, None
+# =========================================================
 
 
 def setup_logging(output_root, timestamp=None):
@@ -138,7 +192,12 @@ def train_baseline(args, model, trainloader, valloader, optimizer, device, label
 
         for g_data, lb_data in trainloader:
             g_data, lb_data = g_data.to(device), lb_data.to(device)
-            g_data = transform_batch(g_data, args, device)
+
+            # --- 修改位置 ---
+            # 如果是 BrainGNN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
+            if args.model_type not in ["BrainGNN"]:
+                g_data = transform_batch(g_data, args, device)
+            # ---------------
 
             optimizer.zero_grad()
             out_cog, out_age, out_gender = model(g_data, None, g_data.batch)
@@ -170,7 +229,12 @@ def train_baseline(args, model, trainloader, valloader, optimizer, device, label
         with torch.no_grad():
             for g_data, lb_data in valloader:
                 g_data, lb_data = g_data.to(device), lb_data.to(device)
-                g_data = transform_batch(g_data, args, device)
+
+                # --- 修改位置 ---
+                # 如果是 BrainGNN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
+                if args.model_type not in ["BrainGNN"]:
+                    g_data = transform_batch(g_data, args, device)
+                # ---------------
 
                 out_cog, _, _ = model(g_data, None, g_data.batch)
                 lb_data_norm = (lb_data - lb_mean) / (lb_std + 1e-8)
@@ -231,7 +295,12 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
             for g_test, lb_test in testloader:
                 g_test = g_test.to(device)
                 lb_test = lb_test.to(device)
-                g_test = transform_batch(g_test, args, device)
+
+                # --- 修改位置 ---
+                # 如果是 BrainGNN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
+                if args.model_type not in ["BrainGNN"]:
+                    g_test = transform_batch(g_test, args, device)
+                # ---------------
 
                 lb_pred, _, _ = model_t(g_test, None, g_test.batch)
 
@@ -330,7 +399,7 @@ def save_summary_results(output_root, timestamp, model_type, modality, labels, a
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Baseline GNN run entry")
-    parser.add_argument("--model_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE", "RelGNN"])
+    parser.add_argument("--model_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE", "RelGNN", "BrainGNN"])
     parser.add_argument("--modality", type=str, default="SC", choices=["SC", "FC", "SC_FC"])
 
     parser.add_argument("--dataset_class", type=str, default="dataset", choices=["dataset"])
@@ -477,7 +546,7 @@ def main():
         testloader = dt.test_dataloader()
         print("dataset loaded for label: {}".format(label))
 
-        model_map = {"GCN": VanillaGCN, "GAT": VanillaGAT, "SAGE": VanillaSAGE, "RelGNN": VanillaRelGNN}
+        model_map = {"GCN": VanillaGCN, "GAT": VanillaGAT, "SAGE": VanillaSAGE, "RelGNN": VanillaRelGNN, "BrainGNN": BrainGNNWrapper}
         model = model_map[args.model_type](args).to(device)
 
         optimizer = torch.optim.AdamW(

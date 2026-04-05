@@ -50,7 +50,14 @@ class Network(torch.nn.Module):
         self.bn2 = torch.nn.BatchNorm1d(self.dim3)
         self.fc3 = torch.nn.Linear(self.dim3, nclass)
 
-    def forward(self, x, edge_index, batch, edge_attr, pos):
+    def forward(self, x, edge_index, batch, edge_attr, pos=None):
+        # 兼容性适配 1：如果我们没传入空间坐标 pos，则直接将 one-hot 的节点身份 x 作为 pos
+        if pos is None:
+            pos = x
+
+        # 兼容性适配 2：BrainGNN 原版只能处理单通道的边权重 (1D)。如果有多个通道，强制取第一个通道 (例如只用 FA)
+        if edge_attr is not None and edge_attr.dim() > 1:
+            edge_attr = edge_attr[:, 0]
 
         x = self.conv1(x, edge_index, edge_attr, pos)
         x, edge_index, edge_attr, batch, perm, score1 = self.pool1(x, edge_index, edge_attr, batch)
@@ -79,7 +86,18 @@ class Network(torch.nn.Module):
             # For classification, use log_softmax
             x = F.log_softmax(self.fc3(x), dim=-1)
 
-        return x, self.pool1.weight, self.pool2.weight, torch.sigmoid(score1).view(x.size(0),-1), torch.sigmoid(score2).view(x.size(0),-1)
+        # PyG 2.x：TopKPooling 的投影参数在子模块 select.weight；旧版为 pool.weight
+        def _topk_pool_weight(pool):
+            w = getattr(pool, "weight", None)
+            return w if w is not None else pool.select.weight
+
+        return (
+            x,
+            _topk_pool_weight(self.pool1),
+            _topk_pool_weight(self.pool2),
+            torch.sigmoid(score1).view(x.size(0), -1),
+            torch.sigmoid(score2).view(x.size(0), -1),
+        )
 
     def augment_adj(self, edge_index, edge_weight, num_nodes):
         edge_index, edge_weight = add_self_loops(edge_index, edge_weight,
