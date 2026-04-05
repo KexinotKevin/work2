@@ -17,9 +17,10 @@ BASE_ARGS="--use_dataset_cfg \
     --input_dimension 300 \
     --hidden_dimension 64 \
     --learning_rate 0.0005 \
-    --dropout 0.2 \
+    --dropout 0.5 \
     --l2_penalty 0.005 \
-    --use_early_stopping"
+    --use_early_stopping \
+    --use_bias_correction"
 
 echo "==========================================="
 echo "       Starting Ablation Study"

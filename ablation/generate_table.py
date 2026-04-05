@@ -58,7 +58,7 @@ def main():
     df_summary = pd.DataFrame(results_summary)
     
     # 1. 保存为 CSV
-    csv_out = "ablation_metrics_summary.csv"
+    csv_out = f"ablation_metrics_summary_{timestamp}.csv"
     df_summary.to_csv(csv_out, index=False)
     print(f"\n[Success] Ablation summary saved to {csv_out}\n")
 
