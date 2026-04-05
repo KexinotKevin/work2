@@ -455,6 +455,10 @@ def parse_args():
     # ======== 修改开始 ========
     parser.add_argument("--disable_grl", action="store_true", default=False,
                         help="Disable GRL adversarial training for ablation studies")
+    parser.add_argument("--disable_pr", action="store_true", default=False,
+                        help="Disable PageRank in LGMVPool for ablation")
+    parser.add_argument("--disable_el", action="store_true", default=False,
+                        help="Disable Edge Learning in LGMVPool for ablation")
     # ======== 修改结束 ========
     
     return parser.parse_args()

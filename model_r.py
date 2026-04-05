@@ -66,8 +66,16 @@ class LGUNet_rela(torch.nn.Module):
         self.down_convs = nn.ModuleList()
         self.pools = nn.ModuleList()
         
+        # ======== 修改开始 ========
+        self.disable_pr = getattr(args, 'disable_pr', False)
+        self.disable_el = getattr(args, 'disable_el', False)
+        # ======== 修改结束 ========
+        
         for i in range(self.depth):
-            self.pools.append(LGMVPool(channels, self.pool_ratios[i], 0.3))
+            # 将消融参数传入 LGMVPool
+            self.pools.append(LGMVPool(channels, self.pool_ratios[i], 0.3, 
+                                       disable_pr=self.disable_pr, 
+                                       disable_el=self.disable_el))
             self.down_convs.append(relationGCN(in_dim=self.hidden_channels, out_dim=self.hidden_channels, relation_num=self.relation_num))
 
         # 【额外修复】：LayerNorm 稳定特征尺度（在特征维度归一化，不破坏图均值）

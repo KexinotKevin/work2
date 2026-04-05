@@ -339,7 +339,7 @@ class PageRankScore(MessagePassing):
 
 
 class LGMVPool(nn.Module):
-    def __init__(self, in_dim, ratio, lamb=0.3, negative_slop=0.2, useSparse=True):
+    def __init__(self, in_dim, ratio, lamb=0.3, negative_slop=0.2, useSparse=True, disable_pr=False, disable_el=False):
         super(LGMVPool, self).__init__()
         self.in_dim = in_dim
         self.ratio = ratio
@@ -347,6 +347,10 @@ class LGMVPool(nn.Module):
         self.negative_slop = negative_slop
         self.sparse_attention = Sparsemax()  # 使用 Sparsemax
         self.lamb = lamb  # 结构学习中的权重参数
+        # ======== 修改开始 ========
+        self.disable_pr = disable_pr  # 新增
+        self.disable_el = disable_el  # 新增
+        # ======== 修改结束 ========
 
         # 可学习参数
         self.alpha = Parameter(torch.Tensor(1))  # 节点度数分数的权重
@@ -376,17 +380,22 @@ class LGMVPool(nn.Module):
         deg = degree(row, num_nodes=num_nodes, dtype=torch.float)  # 节点度数
         score_deg = torch.sigmoid(self.alpha * torch.log(deg + 1e-16)).view(-1, 1)
 
-        # 计算每个关系的 PageRank 分数并求平均
-        pagerank_scores = []
-        for i in range(edge_attr.size(1)):  # 遍历每个关系
-            edge_weight = edge_attr[:, i]
-            pagerank_score = self._calc_pagerank(x, edge_index, edge_weight, x.size(0))
-            pagerank_scores.append(pagerank_score)
-        pagerank_scores = torch.stack(pagerank_scores, dim=1)
-        pagerank_score = torch.mean(pagerank_scores, dim=1)  # 对每个关系的 PageRank 分数求平均
-        score_pagerank = torch.sigmoid(self.beta * pagerank_score).view(-1, 1)
-
-        score = (score_deg + score_pagerank) / 2
+        # ======== 修改开始 ========
+        # [修改1: w/o PR] 屏蔽 PageRank 评分
+        if self.disable_pr:
+            score = score_deg
+        else:
+            # 计算每个关系的 PageRank 分数并求平均
+            pagerank_scores = []
+            for i in range(edge_attr.size(1)):  # 遍历每个关系
+                edge_weight = edge_attr[:, i]
+                pagerank_score = self._calc_pagerank(x, edge_index, edge_weight, x.size(0))
+                pagerank_scores.append(pagerank_score)
+            pagerank_scores = torch.stack(pagerank_scores, dim=1)
+            pagerank_score = torch.mean(pagerank_scores, dim=1)  # 对每个关系的 PageRank 分数求平均
+            score_pagerank = torch.sigmoid(self.beta * pagerank_score).view(-1, 1)
+            score = (score_deg + score_pagerank) / 2
+        # ======== 修改结束 ========
 
         perm = topk(score, self.ratio, batch)
         x = x[perm] * score[perm].view(-1, 1)
@@ -401,29 +410,37 @@ class LGMVPool(nn.Module):
         new_edge_index = new_edge_index[:, sort_idx]
         new_edge_attr = new_edge_attr[sort_idx]
         
-        row, col = new_edge_index
-        # 对每个关系单独计算权重
-        weights = (torch.cat([x[row], x[col]], dim=1) * self.att).sum(dim=-1)
-        # print(weights.size())
-        # norm_edge_attr = [new_edge_attr[k, :]/torch.sum(new_edge_attr[k, :]) for k in range(new_edge_attr.size(0))]
-        # weights = torch.tensor([torch.matmul(new_edge_attr[k, :], new_edge_attr[k, :].t()) for k in range(new_edge_attr.size(0))], dtype=x.dtype, device=x.device)
-        new_attr_list = []
-        for i in range(new_edge_attr.size(1)):
-            tmp_wt = new_edge_attr[:, i]
-            tmp_act_wt = self.lamb * tmp_wt + F.leaky_relu(weights, self.negative_slop)
-            
-            # 【核心修复1】：弃用暴力的 Sparsemax，改用 PyG 原生的 softmax
-            # softmax 不会输出绝对的 0，完美保护梯度流和图连通性
-            sparsed_attr = softmax(tmp_act_wt.clone(), row).to(tmp_act_wt.dtype)
-            new_attr_list.append(sparsed_attr)
+        # ======== 修改开始 ========
+        # [修改2: w/o EL] 屏蔽边权重学习
+        if self.disable_el:
+            mask = (new_edge_attr > 1e-6).any(dim=1)
+            new_edge_index = new_edge_index[:, mask]
+            new_edge_attr = new_edge_attr[mask]
+        else:
+            row, col = new_edge_index
+            # 对每个关系单独计算权重
+            weights = (torch.cat([x[row], x[col]], dim=1) * self.att).sum(dim=-1)
+            # print(weights.size())
+            # norm_edge_attr = [new_edge_attr[k, :]/torch.sum(new_edge_attr[k, :]) for k in range(new_edge_attr.size(0))]
+            # weights = torch.tensor([torch.matmul(new_edge_attr[k, :], new_edge_attr[k, :].t()) for k in range(new_edge_attr.size(0))], dtype=x.dtype, device=x.device)
+            new_attr_list = []
+            for i in range(new_edge_attr.size(1)):
+                tmp_wt = new_edge_attr[:, i]
+                tmp_act_wt = self.lamb * tmp_wt + F.leaky_relu(weights, self.negative_slop)
+                
+                # 【核心修复1】：弃用暴力的 Sparsemax，改用 PyG 原生的 softmax
+                # softmax 不会输出绝对的 0，完美保护梯度流和图连通性
+                sparsed_attr = softmax(tmp_act_wt.clone(), row).to(tmp_act_wt.dtype)
+                new_attr_list.append(sparsed_attr)
 
-        new_edge_attr = torch.stack(new_attr_list, dim=1)
+            new_edge_attr = torch.stack(new_attr_list, dim=1)
 
-        # 【核心修复2】：只要任何一个模态(FA, FC等)的权重有效，就保留这条边！
-        # 避免仅因为 FA 被判定不重要，就误删了拥有极强 FC 信号的连接
-        mask = (new_edge_attr > 1e-6).any(dim=1)
-        new_edge_index = new_edge_index[:, mask]
-        new_edge_attr = new_edge_attr[mask]
+            # 【核心修复2】：只要任何一个模态(FA, FC等)的权重有效，就保留这条边！
+            # 避免仅因为 FA 被判定不重要，就误删了拥有极强 FC 信号的连接
+            mask = (new_edge_attr > 1e-6).any(dim=1)
+            new_edge_index = new_edge_index[:, mask]
+            new_edge_attr = new_edge_attr[mask]
+        # ======== 修改结束 ========
 
         return x, new_edge_index, new_edge_attr, perm, batch
 
