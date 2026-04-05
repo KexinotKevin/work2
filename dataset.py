@@ -57,6 +57,7 @@ class dataset():
         sc_kinds=None,
         fc_kind="pcc_rest",
         output_dir=None,
+        cons_thresh=0.75,
     ):
         super().__init__()
         self.dsDir = "/public/home/baitianyu/kexin/datasets/"
@@ -72,6 +73,7 @@ class dataset():
         self.Isheader = False
         self.use_cfg_layout = False
         self.output_dir = output_dir
+        self.cons_thresh = cons_thresh
 
     def dspath_configuration(self, dsType):
         if self.use_dataset_cfg:
@@ -144,7 +146,8 @@ class dataset():
                                   atlas_name=self.atlas_name,
                                   gender_col=self.gender_col,
                                   age_col=self.age_col,
-                                  output_dir=self.output_dir)
+                                  output_dir=self.output_dir,
+                                  cons_thresh=self.cons_thresh)
         
         train_size = int(split_ratio[0] * len(self.datalist))
         # print(train_size)

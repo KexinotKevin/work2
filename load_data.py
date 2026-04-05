@@ -110,6 +110,7 @@ def load_data(
     gender_col=None,
     age_col=None,
     output_dir=None,
+    cons_thresh=0.75,
 ):
     def process_age(val):
         """处理异质性年龄格式：S1200区间型、ABCD整型、HCD连续型"""
@@ -139,8 +140,11 @@ def load_data(
     # ==================== 【核心新增 1：初始化磁盘缓存机制】 ====================
     atlas_tag = atlas_name if atlas_name else "default"
     sc_tag = "-".join(sc_netnames)
-    # Bump cache tag when node feature layout changes (old caches used N×N identity, now uses fixed 300-dim one-hot).
-    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}_thr75_feat300.pt".replace("/", "_")
+    
+    # ======== 修改开始 ======== 动态记录阈值
+    thr_str = str(int(cons_thresh * 100))
+    cache_filename = f"cached_graphs_{atlas_tag}_{sc_tag}_{fc_netname}_thr{thr_str}_feat300.pt".replace("/", "_")
+    # ======== 修改结束 ========
     cache_path = osp.join(netDir, cache_filename)
 
     graph_dict = {}
@@ -204,16 +208,17 @@ def load_data(
                 if fc_mat.shape[0] != fc_mat.shape[1]: continue
                 raw_mats_list.append({'subj': subj, 'sc_mats': sc_mats, 'fc_mat': fc_mat})
 
-        # --- 阶段 2：计算组水平的变异系数阈值掩码 (p=0.75) ---
+        # --- 阶段 2：计算组水平的变异系数阈值掩码 (p={cons_thresh}) ---
         if raw_mats_list:
             n_nodes = raw_mats_list[0]['fc_mat'].shape[0]
             num_sc = len(raw_mats_list[0]['sc_mats'])
             global_mask = np.zeros((n_nodes, n_nodes), dtype=bool)
 
-            print(">>> Calculating group consistency threshold (p=0.75)...")
+            # ======== 修改开始 ========
+            print(f">>> Calculating group consistency threshold (p={cons_thresh})...")
             # 处理所有 SC
             W_thr_sc_list = []
-            global_sc_max = []  # 【新增】：记录每种 SC 的全局最大值
+            global_sc_max = [] 
             for sc_idx in range(num_sc):
                 Ws_sc = np.stack([rm['sc_mats'][sc_idx] for rm in raw_mats_list], axis=2)
                 
@@ -221,14 +226,15 @@ def load_data(
                 safe_max = np.percentile(np.abs(Ws_sc), 99.0)
                 global_sc_max.append(safe_max if safe_max > 0 else 1.0)
                 
-                W_thr_sc = threshold_consistency(Ws_sc, 0.75)
+                W_thr_sc = threshold_consistency(Ws_sc, cons_thresh)  # 替换为动态变量
                 global_mask |= (W_thr_sc != 0)
                 W_thr_sc_list.append(W_thr_sc)
 
             # 处理 FC
             Ws_fc = np.stack([rm['fc_mat'] for rm in raw_mats_list], axis=2)
-            W_thr_fc = threshold_consistency(Ws_fc, 0.75)
+            W_thr_fc = threshold_consistency(Ws_fc, cons_thresh)      # 替换为动态变量
             global_mask |= (W_thr_fc != 0)
+            # ======== 修改结束 ========
 
             # --- 保存阈值处理相关数据到实验结果目录 ---
             if output_dir is not None:

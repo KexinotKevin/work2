@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import pandas as pd
 import numpy as np
@@ -15,11 +16,12 @@ def find_latest_test_csv(base_dir):
 
 def main():
     # 定义四个消融实验及其对应的文件夹
+    timestamp = sys.argv[1]
     experiments = {
-        "Ours": "./results/ours",
-        "w/o GRL": "./results/wo_grl",
-        "w/o PR": "./results/wo_pr",
-        "w/o EL": "./results/wo_el"
+        "Ours": f"./results/{timestamp}/ours",
+        "w/o GRL": f"./results/{timestamp}/wo_grl",
+        "w/o PR": f"./results/{timestamp}/wo_pr",
+        "w/o EL": f"./results/{timestamp}/wo_el"
     }
 
     results_summary = []

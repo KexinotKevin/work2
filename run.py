@@ -461,6 +461,13 @@ def parse_args():
                         help="Disable Edge Learning in LGMVPool for ablation")
     # ======== 修改结束 ========
     
+    # ======== 修改开始 ========
+    parser.add_argument("--cons_thresh", type=float, default=0.75,
+                        help="Consistency threshold for graph construction (default: 0.75)")
+    parser.add_argument("--pool_strategy", type=str, default="concat", choices=["concat", "gmp", "gap"],
+                        help="Global pooling strategy: concat, gmp, or gap (default: concat)")
+    # ======== 修改结束 ========
+    
     return parser.parse_args()
 
 
@@ -521,6 +528,7 @@ def main():
             sc_kinds=args.sc_kinds,
             fc_kind=args.fc_kind,
             output_dir=label_output_dir,
+            cons_thresh=args.cons_thresh,
         )
         dt.setsubset(
             labelType=args.label_type,

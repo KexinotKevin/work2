@@ -32,29 +32,30 @@ class LGUNet_rela(torch.nn.Module):
         self.sum_res = sum_res
         self.batch = args.batch
 
-        self.lin1 = torch.nn.Linear(self.hidden_channels*2, self.hidden_channels)
-        self.lin2 = torch.nn.Linear(self.hidden_channels, self.hidden_channels // 2)
-        self.lin3 = torch.nn.Linear(self.hidden_channels // 2, 1)
-
         # ======== 修改开始 ========
-        # GRL 对抗分支：添加外部开关
-        self.use_grl = not getattr(args, 'disable_grl', False)
+        # 根据池化策略计算降维前的特征维度
+        self.pool_strategy = getattr(args, 'pool_strategy', 'concat')
+        self.pooled_dim = self.hidden_channels * 2 if self.pool_strategy == 'concat' else self.hidden_channels
         
+        self.use_grl = not getattr(args, 'disable_grl', False)
         if self.use_grl:
             self.age_predictor = nn.Sequential(
-                nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+                nn.Linear(self.pooled_dim, self.hidden_channels),
                 nn.ReLU(),
                 nn.Dropout(p=self.drop),
                 nn.Linear(self.hidden_channels, 1)
             )
-            # GRL 对抗分支：性别分类器
             self.gender_predictor = nn.Sequential(
-                nn.Linear(self.hidden_channels * 2, self.hidden_channels),
+                nn.Linear(self.pooled_dim, self.hidden_channels),
                 nn.ReLU(),
                 nn.Dropout(p=self.drop),
                 nn.Linear(self.hidden_channels, 1)
             )
         # ======== 修改结束 ========
+
+        self.lin1 = torch.nn.Linear(self.pooled_dim, self.hidden_channels)
+        self.lin2 = torch.nn.Linear(self.hidden_channels, self.hidden_channels // 2)
+        self.lin3 = torch.nn.Linear(self.hidden_channels // 2, 1)
 
         channels = self.hidden_channels
 
@@ -122,9 +123,15 @@ class LGUNet_rela(torch.nn.Module):
         # readout
         x_cl=[]
         for x in xs:
-            glob_x = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
-            # 【修改】：直接将图向量 append，移除 F.relu，防止特征被截断为空
+            # ======== 修改开始 ========
+            if self.pool_strategy == 'concat':
+                glob_x = torch.cat([gmp(x, batch), gap(x, batch)], dim=1)
+            elif self.pool_strategy == 'gmp':
+                glob_x = gmp(x, batch)
+            elif self.pool_strategy == 'gap':
+                glob_x = gap(x, batch)
             x_cl.append(glob_x)
+            # ======== 修改结束 ========
         x_cl = sum(x_cl)
 
         # 主任务：认知能力预测
