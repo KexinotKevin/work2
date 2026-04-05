@@ -15,12 +15,12 @@ import numpy as np
 # 实验配置：阈值和池化策略
 timestamp = sys.argv[1]
 experiments = {
-    "Thresh (p=0.25)": f"./results/{timestamp}/thresh_0.25",
-    "Thresh (p=0.50)": f"./results/{timestamp}/thresh_0.50",
-    "Ours (Thresh p=0.75, Concat)": f"./results/{timestamp}/ours",
-    "Thresh (p=1.0)": f"./results/{timestamp}/thresh_1.0",
-    "Pooling (GMP Only)": f"./results/{timestamp}/pool_gmp",
-    "Pooling (GAP Only)": f"./results/{timestamp}/pool_gap"
+    "Thresh (p=0.25)": f"../results/ablation/{timestamp}/thresh_0.25",
+    "Thresh (p=0.50)": f"../results/ablation/{timestamp}/thresh_0.50",
+    "Ours (Thresh p=0.75, Concat)": f"../results/ablation/{timestamp}/ours",
+    "Thresh (p=1.0)": f"../results/ablation/{timestamp}/thresh_1.0",
+    "Pooling (GMP Only)": f"../results/ablation/{timestamp}/pool_gmp",
+    "Pooling (GAP Only)": f"../results/ablation/{timestamp}/pool_gap"
 }
 
 def load_experiment_results(exp_path):
@@ -63,8 +63,18 @@ def format_metric(value, std):
     return f"${value:.4f} \\pm {std:.4f}$"
 
 def generate_latex_table(all_results):
-    """生成 LaTeX 表格"""
-    # 表头
+    """生成 LaTeX 表格，按 Label 分组展示"""
+    if not all_results:
+        return "No results available."
+    
+    # 获取所有唯一的 Label
+    all_labels = set()
+    for exp_results in all_results.values():
+        for r in exp_results:
+            all_labels.add(r['label'])
+    labels = sorted(all_labels)
+    
+    # 表头：每个实验一行，每个 Label 下显示指标
     header = """\\begin{table}[htbp]
 \\centering
 \\caption{Ablation Study: Consistency Threshold and Pooling Strategy}
@@ -73,20 +83,19 @@ def generate_latex_table(all_results):
 \\textbf{Experiment} & \\textbf{RMSE} & \\textbf{MAE} & \\textbf{R$^2$} & \\textbf{Pearson r} \\\\"""
     
     rows = []
-    for exp_name, exp_path in experiments.items():
-        results = load_experiment_results(exp_path)
-        if results:
-            # 汇总所有 label 的结果
-            avg_rmse = np.mean([r['rmse_mean'] for r in results])
-            avg_rmse_std = np.mean([r['rmse_std'] for r in results])
-            avg_mae = np.mean([r['mae_mean'] for r in results])
-            avg_mae_std = np.mean([r['mae_std'] for r in results])
-            avg_r2 = np.mean([r['r2_mean'] for r in results])
-            avg_r2_std = np.mean([r['r2_std'] for r in results])
-            avg_pearson = np.mean([r['pearson_mean'] for r in results])
-            avg_pearson_std = np.mean([r['pearson_std'] for r in results])
+    
+    # 按实验顺序输出
+    for exp_name in experiments.keys():
+        if exp_name not in all_results or not all_results[exp_name]:
+            continue
             
-            row = f"\\hline\n{exp_name} & {format_metric(avg_rmse, avg_rmse_std)} & {format_metric(avg_mae, avg_mae_std)} & {format_metric(avg_r2, avg_r2_std)} & {format_metric(avg_pearson, avg_pearson_std)} \\\\"
+        results = all_results[exp_name]
+        
+        # 按 Label 分组输出，每个 Label 一行
+        for r in results:
+            label = r['label']
+            exp_display = f"{exp_name}" if r == results[0] else ""  # 只在第一行显示实验名
+            row = f"\\hline\n{exp_display} ({label}) & {format_metric(r['rmse_mean'], r['rmse_std'])} & {format_metric(r['mae_mean'], r['mae_std'])} & {format_metric(r['r2_mean'], r['r2_std'])} & {format_metric(r['pearson_mean'], r['pearson_std'])} \\\\"
             rows.append(row)
     
     footer = """\\hline
@@ -129,23 +138,16 @@ def main():
     print("=" * 80)
     print()
     
-    md_header = "| Experiment | RMSE | MAE | R² | Pearson r |"
-    md_sep = "|------------|------|-----|----|-----------|"
+    md_header = "| Experiment (Label) | RMSE | MAE | R² | Pearson r |"
+    md_sep = "|--------------------|------|-----|----|-----------|"
     
     md_rows = []
     for exp_name, exp_path in experiments.items():
         results = load_experiment_results(exp_path)
         if results:
-            avg_rmse = np.mean([r['rmse_mean'] for r in results])
-            avg_rmse_std = np.mean([r['rmse_std'] for r in results])
-            avg_mae = np.mean([r['mae_mean'] for r in results])
-            avg_mae_std = np.mean([r['mae_std'] for r in results])
-            avg_r2 = np.mean([r['r2_mean'] for r in results])
-            avg_r2_std = np.mean([r['r2_std'] for r in results])
-            avg_pearson = np.mean([r['pearson_mean'] for r in results])
-            avg_pearson_std = np.mean([r['pearson_std'] for r in results])
-            
-            md_rows.append(f"| {exp_name} | {avg_rmse:.4f}±{avg_rmse_std:.4f} | {avg_mae:.4f}±{avg_mae_std:.4f} | {avg_r2:.4f}±{avg_r2_std:.4f} | {avg_pearson:.4f}±{avg_pearson_std:.4f} |")
+            for r in results:
+                label = r['label']
+                md_rows.append(f"| {exp_name} ({label}) | {r['rmse_mean']:.4f}±{r['rmse_std']:.4f} | {r['mae_mean']:.4f}±{r['mae_std']:.4f} | {r['r2_mean']:.4f}±{r['r2_std']:.4f} | {r['pearson_mean']:.4f}±{r['pearson_std']:.4f} |")
     
     print(md_header)
     print(md_sep)
