@@ -9,11 +9,10 @@ export PYTHONPATH="$(pwd)/../../":$PYTHONPATH
 
 # 生成共享时间戳，所有模型的结果保存到同一文件夹
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTPUT_ROOT="../results/debug_baseline/${TIMESTAMP}"
+OUTPUT_ROOT="../results/baseline_hcd/${TIMESTAMP}"
 
-# MODELS=("GCN" "GAT" "SAGE" "RelGNN" "BrainGNN" "BrainNetCNN" "GraphTransformer" "BNT")
+MODELS=("GraphTransformer" "BNT" "BrainRGIN")
 # 加入新的三个模型
-MODELS=("BrainRGIN")
 MODALITIES=("SC" "FC" "SC_FC")
 # MODALITIES=("SC" "FC")
 
@@ -30,22 +29,38 @@ for MODEL in "${MODELS[@]}"; do
         fi
 
         echo ">>> Running Baseline | Model: ${MODEL} | Modality: ${MOD} | Timestamp: ${TIMESTAMP} <<<"
-        
+        # HCD（bna246/246）；续行行尾禁止写 # 注释，否则会打断 \ 续行
         python run_baseline.py \
             --model_type ${MODEL} \
             --modality ${MOD} \
             --use_dataset_cfg \
             --num_epochs 100 \
-            --dataset_name S1200 \
-            --atlas_name schaefer200_S1 \
-            --num_nodes 216 \
-            --sc_kinds FA \
+            --dataset_name HCD \
+            --atlas_name bna246 \
+            --num_nodes 246 \
+            --sc_kinds fiber_count \
             --fc_kind pcc_rest \
-            --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
+            --label_types 'nih_fluidcogcomp_unadjusted','nih_eccogcomp_unadjusted','nih_totalcogcomp_unadjusted','nih_crycogcomp_unadjusted' \
             --output_root ${OUTPUT_ROOT} \
             --timestamp ${TIMESTAMP} \
             --disable_grl \
             --seed 42 \
             --use_early_stopping
+        # python run_baseline.py \
+        #     --model_type ${MODEL} \
+        #     --modality ${MOD} \
+        #     --use_dataset_cfg \
+        #     --num_epochs 100 \
+        #     --dataset_name S1200 \
+        #     --atlas_name schaefer200_S1 \
+        #     --num_nodes 216 \
+        #     --sc_kinds FA \
+        #     --fc_kind pcc_rest \
+        #     --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
+        #     --output_root ${OUTPUT_ROOT} \
+        #     --timestamp ${TIMESTAMP} \
+        #     --disable_grl \
+        #     --seed 42 \
+        #     --use_early_stopping
     done
 done

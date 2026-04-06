@@ -9,19 +9,26 @@ if [ -n "${CONDA_BASE}" ] && [ -f "${CONDA_BASE}/etc/profile.d/conda.sh" ]; then
 fi
 conda activate gnn_work2
 
+# S1200： 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj'
+ABCD_LABELS=('nihtbx_fluidcomp_uncorrected' 'nihtbx_cryst_uncorrected' 'nihtbx_totalcomp_uncorrected')
+HCD_LABELS=('nih_fluidcogcomp_unadjusted' 'nih_crycogcomp_unadjusted' 'nih_totalcogcomp_unadjusted')
+
 # 跨数据集时：--label_type 必须是「目标数据集」分数表中的列名；训练时用的列名从 checkpoint 旁 label_name.txt 自动读取。
 # 示例1：HCD 上训练的模型在 ABCD 上测（目标列为 ABCD 的 nihtbx_fluidcomp_uncorrected）
-python test.py \
-    --model_path debug_results/hcd_mat_test/20260406_053055/HCD/atlas_bna246__sc_fiber_count__fc_pcc_rest/split_70_15_15/seed_42/label_nih_fluidcogcomp_unadjusted/best_validation.pth \
-    --label_type "CogFluidComp_Unadj" \
-    --dataset_name S1200 \
-    --atlas_name bna246 \
-    --sc_kinds fiber_count \
-    --fc_kind pcc_rest \
-    --seed 42 \
-    --partition all \
-    --test_repeat 5
-
+for i in {0..2}; do
+    label_abcd=${ABCD_LABELS[$i]}
+    label_hcd=${HCD_LABELS[$i]}
+    python test.py \
+        --model_path results/hcd_all/20260406_122112/HCD/atlas_bna246__sc_fiber_count__fc_pcc_rest/split_70_15_15/seed_42/label_${label_hcd}/best_validation.pth \
+        --label_type ${label_abcd} \
+        --dataset_name ABCD \
+        --atlas_name bna246 \
+        --sc_kinds fiber_count \
+        --fc_kind pcc_rest \
+        --seed 42 \
+        --partition all \
+        --test_repeat 10
+done
 # 示例2：跨数据集测试（例如：用上面训练好的S1200模型，在ABCD的全部数据上做推理！）
 # python test.py \
 #     --model_path results_full/20260331_154936/S1200/atlas_bna246__sc_FA-fiber_length__fc_pcc_rest/split_70_15_15/seed_42/label_CogFluidComp_Unadj/best_validation.pth \

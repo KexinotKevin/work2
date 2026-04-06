@@ -277,8 +277,9 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
 
     from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
     from scipy.stats import pearsonr
+    from metrics import concordance_correlation_coefficient
 
-    total_rmse, total_mae, total_r2, total_p = [], [], [], []
+    total_rmse, total_mae, total_r2, total_p, total_ccc = [], [], [], [], []
     
     print(f"\n>>> Starting Evaluation for Label: {label_output_dir}")
     for _ in range(args.test_repeat):
@@ -324,6 +325,7 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
             total_mae.append(mean_absolute_error(yt, yp))
             total_r2.append(r2_score(yt, yp))
             total_p.append(pearsonr(yt, yp)[0])
+            total_ccc.append(concordance_correlation_coefficient(yt, yp))
 
     # 打印到終端
     print(f"Test Results over {args.test_repeat} repeats:")
@@ -331,13 +333,15 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
     print(f"  MAE:  {np.mean(total_mae):.4f} ± {np.std(total_mae):.4f}")
     print(f"  R2:   {np.mean(total_r2):.4f} ± {np.std(total_r2):.4f}")
     print(f"  Pearson r: {np.mean(total_p):.4f} ± {np.std(total_p):.4f}")
+    print(f"  CCC:       {np.mean(total_ccc):.4f} ± {np.std(total_ccc):.4f}")
 
     # 保存到 CSV
     df2 = pd.DataFrame({
         "repeat_rmse": total_rmse,
         "repeat_mae": total_mae,
         "repeat_r2": total_r2,
-        "pearson_corr": total_p
+        "pearson_corr": total_p,
+        "repeat_ccc": total_ccc
     })
     df2.to_csv(os.path.join(label_output_dir, "test.csv"), index=False)
 
@@ -429,11 +433,11 @@ def parse_args():
         default=None,
         help="Edge relation count = len(sc_kinds)+2 (FC pos/neg). Default: inferred from sc_kinds.",
     )
-    parser.add_argument("--hidden_dimension", type=int, default=216)
+    parser.add_argument("--hidden_dimension", type=int, default=32)
     parser.add_argument("--output_dimension", type=int, default=1)
-    parser.add_argument("--depth", type=int, default=3)
-    parser.add_argument("--dropout", type=float, default=0.3)
-    parser.add_argument("--pool_ratio", type=float, nargs="+", default=[0.8, 0.8, 0.8])
+    parser.add_argument("--depth", type=int, default=2)
+    parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--pool_ratio", type=float, nargs="+", default=[0.5, 0.8, 0.5])
 
     parser.add_argument("--split_ratio", type=float, nargs=3, default=[0.7, 0.15, 0.15])
     parser.add_argument("--seed", type=int, default=42)
@@ -447,7 +451,7 @@ def parse_args():
     # 动态学习率参数
     parser.add_argument("--use_dynamic_lr", action="store_true", default=False,
                         help="Enable dynamic learning rate adjustment based on loss and gradients")
-    parser.add_argument("--lr_patience", type=int, default=10,
+    parser.add_argument("--lr_patience", type=int, default=5,
                         help="Patience for loss plateau detection in dynamic LR scheduler")
     parser.add_argument("--lr_factor", type=float, default=0.5,
                         help="Learning rate decay factor when plateau detected")

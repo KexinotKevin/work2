@@ -9,6 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../.
 from dataset import dataset
 from baseline_models.models.vanilla_gnn import VanillaGCN, VanillaGAT, VanillaSAGE, VanillaRelGNN
 from strategies import EarlyStopping
+from metrics import concordance_correlation_coefficient
 
 
 def safe_pearsonr(x, y, eps=1e-12):
@@ -519,7 +520,7 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
 
     from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
 
-    total_rmse, total_mae, total_r2, total_p = [], [], [], []
+    total_rmse, total_mae, total_r2, total_p, total_ccc = [], [], [], [], []
     total_bias_age_corr = []  # 新增：预测认知分数与真实年龄的相关性（偏误指标）
 
     print(f"\n>>> Starting Evaluation for Label: {label_output_dir}")
@@ -553,6 +554,8 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
             r_main, _ = safe_pearsonr(lb_test, lb_pred)
             total_p.append(r_main)
 
+            total_ccc.append(concordance_correlation_coefficient(lb_test, lb_pred))
+
             # 计算偏误指标：预测认知分数与真实年龄的 Pearson 相关性
             # 理想情况：作弊模型该值会很高(>0.5)，带 GRL 的模型趋近于 0
             bias_corr, _ = safe_pearsonr(lb_pred, age_test)
@@ -563,6 +566,7 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
     print(f"  MAE:  {np.mean(total_mae):.4f} ± {np.std(total_mae):.4f}")
     print(f"  R2:   {np.mean(total_r2):.4f} ± {np.std(total_r2):.4f}")
     print(f"  Pearson r: {np.nanmean(total_p):.4f} ± {np.nanstd(total_p):.4f}")
+    print(f"  CCC:       {np.nanmean(total_ccc):.4f} ± {np.nanstd(total_ccc):.4f}")
     print(f"  >>> Bias Metric (Pred Cog vs True Age r): {np.nanmean(total_bias_age_corr):.4f} ± {np.nanstd(total_bias_age_corr):.4f}")
 
     df2 = pd.DataFrame({
@@ -570,6 +574,7 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
         "repeat_mae": total_mae,
         "repeat_r2": total_r2,
         "pearson_corr": total_p,
+        "repeat_ccc": total_ccc,  # 新增：CCC 指标
         "bias_age_corr": total_bias_age_corr  # 新增：年龄偏误指标
     })
     df2.to_csv(os.path.join(label_output_dir, "test.csv"), index=False)
@@ -584,6 +589,8 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
         "R2_std": np.std(total_r2),
         "Pearson_r": float(np.nanmean(total_p)),
         "Pearson_r_std": float(np.nanstd(total_p)),
+        "CCC": float(np.nanmean(total_ccc)),
+        "CCC_std": float(np.nanstd(total_ccc)),
         "Bias_Age_Corr": float(np.nanmean(total_bias_age_corr)),
         "Bias_Age_Corr_std": float(np.nanstd(total_bias_age_corr)),
     }
@@ -667,9 +674,9 @@ def parse_args():
     parser.add_argument("--depth", type=int, default=2)
     parser.add_argument("--dropout", type=float, default=0.5)
 
-    parser.add_argument("--split_ratio", type=float, nargs=3, default=[0.7, 0.15, 0.15])
+    parser.add_argument("--split_ratio", type=float, nargs=3, default=[0.8, 0.1, 0.1])
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--test_repeat", type=int, default=11)
+    parser.add_argument("--test_repeat", type=int, default=10)
     parser.add_argument("--output_root", type=str, default="./baseline_results")
     parser.add_argument("--timestamp", type=str, default=None,
                         help="共享时间戳，多个模型使用同一时间戳，结果保存到同一文件夹")

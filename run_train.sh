@@ -68,7 +68,7 @@ python run.py --use_dataset_cfg \
 #     --output_root ./debug_results/test_thr_avail \
 #     --no_normalize_labels \
 #     --use_early_stopping \
-#     --pool_ration [1,1,1] \
+#     --pool_ratio [1,1,1] \
 #     --disable_grl \
 #     --use_dynamic_lr \
 #     --lr_patience 10 \

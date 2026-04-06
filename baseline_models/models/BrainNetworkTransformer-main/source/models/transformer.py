@@ -5,6 +5,14 @@ from omegaconf import DictConfig
 from .base import BaseModel
 
 
+def _nhead_for_d_model(d_model: int, preferred: int = 4) -> int:
+    """选取满足 d_model % nhead == 0 的注意力头数（PyTorch MultiheadAttention 约束）。输入: d_model, 首选头数; 输出: 合法 nhead。"""
+    for h in (preferred, 3, 2, 1):
+        if d_model % h == 0:
+            return h
+    return 1
+
+
 class GraphTransformer(BaseModel):
 
     def __init__(self, cfg: DictConfig):
@@ -14,10 +22,12 @@ class GraphTransformer(BaseModel):
         self.attention_list = nn.ModuleList()
         self.readout = cfg.model.readout
         self.node_num = cfg.dataset.node_sz
+        d_model = cfg.dataset.node_feature_sz
+        nhead = _nhead_for_d_model(int(d_model), 4)
 
         for _ in range(cfg.model.self_attention_layer):
             self.attention_list.append(
-                TransformerEncoderLayer(d_model=cfg.dataset.node_feature_sz, nhead=4, dim_feedforward=1024,
+                TransformerEncoderLayer(d_model=d_model, nhead=nhead, dim_feedforward=1024,
                                         batch_first=True)
             )
 
