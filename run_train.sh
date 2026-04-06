@@ -20,20 +20,21 @@ conda activate gnn_work2
 # --min_lr: 最小学习率（默认1e-6）
 # --warmup_epochs: 预热epoch数（默认5）
 
-# debug
+# HCD .mat格式测试
 python run.py --use_dataset_cfg \
-    --num_epochs 200 \
-    --dataset_name S1200 \
-    --atlas_name schaefer200_S1 \
-    --sc_kinds FA fiber_count \
+    --num_epochs 2 \
+    --dataset_name HCD \
+    --atlas_name bna246 \
+    --sc_kinds fiber_count \
     --fc_kind pcc_rest \
-    --label_types 'CogFluidComp_Unadj' \
-    --output_root ./debug_results/debug_adamw \
+    --label_types 'nih_fluidcogcomp_unadjusted' \
+    --output_root ./debug_results/hcd_mat_test \
     --depth 2 \
     --input_dimension 300 \
-    --hidden_dimension 64 \
-    --learning_rate 0.0005 \
-    --dropout 0.4 \
+    --hidden_dimension 32 \
+    --batch 8 \
+    --learning_rate 0.001 \
+    --dropout 0.5 \
     --l2_penalty 0.01 \
     --use_early_stopping
 
@@ -55,25 +56,6 @@ python run.py --use_dataset_cfg \
 #     --min_lr 1e-6 \
 #     --warmup_epochs 5
 
-# 【禁用规范化且使用动态学习率示例】
-# python run.py --use_dataset_cfg \
-#     --num_epochs 100 \
-#     --dataset_name S1200 \
-#     --atlas_name bna246 \
-#     --sc_kinds FA fiber_length \
-#     --fc_kind pcc_rest \
-#     --label_types 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj' \
-#     --output_root ./results_dyn_lr \
-#     --learning_rate 0.0001 \
-#     --dropout 0.1 \
-#     --depth 2 \
-#     --no_normalize_labels \
-#     --use_dynamic_lr \
-#     --lr_patience 15 \
-#     --lr_factor 0.3 \
-#     --min_lr 1e-7 \
-#     --warmup_epochs 10
-
 # 【原始静态学习率（无动态调整）】
 # python run.py --use_dataset_cfg \
 #     --num_epochs 100 \
@@ -92,3 +74,4 @@ python run.py --use_dataset_cfg \
 
 # S1200： 'CogFluidComp_Unadj','CogEarlyComp_Unadj','CogTotalComp_Unadj','CogCrystalComp_Unadj'
 #ABCD: 'nihtbx_fluidcomp_uncorrected','nihtbx_cryst_uncorrected','nihtbx_totalcomp_uncorrected'
+# HCD:  'nih_fluidcogcomp_unadjusted','nih_crycogcomp_unadjusted','nih_eccogcomp_unadjusted','nih_totalcogcomp_unadjusted'

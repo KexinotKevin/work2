@@ -73,7 +73,8 @@ class dataset():
         self.Isheader = False
         self.use_cfg_layout = False
         self.output_dir = output_dir
-        self.cons_thresh = cons_thresh
+        self.use_mat_format = False
+        self.matDir = None
 
     def dspath_configuration(self, dsType):
         if self.use_dataset_cfg:
@@ -96,6 +97,9 @@ class dataset():
             self.netname = self.sc_netnames + [self.fc_netname]
             self.use_cfg_layout = True
             self.Isheader = True
+            # ====== 【HCD使用.mat格式】 ======
+            self.use_mat_format = (self.dataset_name.upper() == "HCD")
+            self.matDir = self.dsDir
             return
 
         if dsType == "HCP":
@@ -110,12 +114,14 @@ class dataset():
             self.fc_netname = self.netname[1]
         elif dsType == "HCD":
             self.dsDir = osp.join(self.dsDir, "HCD")
-            self.netDir = osp.join(self.dsDir, "network_csv")
+            self.netDir = osp.join(self.dsDir, "network_mat")
+            self.matDir = osp.join(self.dsDir, "network_mat")
             self.netname = ["bna246_SC", "bna246_FC"]
             self.labelfile = osp.join(self.dsDir, "HCD_471_CogScores.csv")
             self.subject_col = "Subject"
             self.use_cfg_layout = False
             self.Isheader = False
+            self.use_mat_format = True
             self.sc_netnames = [self.netname[0]]
             self.fc_netname = self.netname[1]
 
@@ -147,7 +153,8 @@ class dataset():
                                   gender_col=self.gender_col,
                                   age_col=self.age_col,
                                   output_dir=self.output_dir,
-                                  cons_thresh=self.cons_thresh)
+                                  matDir=self.matDir,
+                                  use_mat_format=self.use_mat_format)
         
         train_size = int(split_ratio[0] * len(self.datalist))
         # print(train_size)
