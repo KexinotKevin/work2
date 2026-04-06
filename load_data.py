@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import networkx as nx
 import scipy.sparse as sp
+import scipy.io as sio
 import os.path as osp
 import torch
 from torch_geometric.data import data as D
@@ -93,6 +94,28 @@ def _torch_load_graph_cache(path):
         return torch.load(path)
 
 
+def load_mat_file(filepath, key=None):
+    """Load .mat file using scipy.io and return the connectivity matrix.
+    
+    Args:
+        filepath: Path to the .mat file
+        key: Specific key to extract. If None, uses 'probmat' or first non-meta key.
+    """
+    try:
+        mat = sio.loadmat(filepath)
+        if key and key in mat:
+            return mat[key]
+        if 'probmat' in mat:
+            return mat['probmat']
+        # Fallback: return first non-meta key
+        for k in mat.keys():
+            if not k.startswith('__'):
+                return mat[k]
+        raise ValueError(f"No usable matrix found in {filepath}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to load MAT file {filepath}: {e}") from e
+
+
 def load_data(
     netDir,
     subjlist,
@@ -110,6 +133,8 @@ def load_data(
     gender_col=None,
     age_col=None,
     output_dir=None,
+    matDir=None,
+    use_mat_format=False,
 ):
     def process_age(val):
         """处理异质性年龄格式：S1200区间型、ABCD整型、HCD连续型"""
@@ -184,17 +209,30 @@ def load_data(
                 if use_cfg_layout:
                     if not atlas_name:
                         raise ValueError("atlas_name is required when use_cfg_layout=True.")
-                    sc_mats, missing_sc = [], False
-                    for sc_name in sc_netnames:
-                        sc_base = osp.join(netDir, atlas_name, subj_for_file, "SC", sc_name)
-                        sc_path = _resolve_conn_file(sc_base)
-                        if sc_path is None:
-                            missing_sc = True; break
-                        sc_mats.append(load_connectivity_matrix(sc_path, isheader=True))
-                    fc_base = osp.join(netDir, atlas_name, subj_for_file, "FC", fc_netname)
-                    fc_path = _resolve_conn_file(fc_base)
-                    if missing_sc or fc_path is None: continue
-                    fc_mat = load_connectivity_matrix(fc_path, isheader=True)
+                    
+                    # ====== 【HCD .mat格式处理 - 新结构】 ======
+                    if use_mat_format and matDir:
+                        # 新结构: {matDir}/{subj}/SC/pSC.mat 和 FC/pFC.mat
+                        sc_path = osp.join(matDir, subj_for_file, "SC", "pSC.mat")
+                        fc_path = osp.join(matDir, subj_for_file, "FC", "pFC.mat")
+                        if osp.exists(sc_path) and osp.exists(fc_path):
+                            sc_mat = load_mat_file(sc_path, key='triangle')
+                            fc_mat = load_mat_file(fc_path, key='fun_clean_cor')
+                            sc_mats = [sc_mat]
+                        else:
+                            continue
+                    else:
+                        sc_mats, missing_sc = [], False
+                        for sc_name in sc_netnames:
+                            sc_base = osp.join(netDir, atlas_name, subj_for_file, "SC", sc_name)
+                            sc_path = _resolve_conn_file(sc_base)
+                            if sc_path is None:
+                                missing_sc = True; break
+                            sc_mats.append(load_connectivity_matrix(sc_path, isheader=True))
+                        fc_base = osp.join(netDir, atlas_name, subj_for_file, "FC", fc_netname)
+                        fc_path = _resolve_conn_file(fc_base)
+                        if missing_sc or fc_path is None: continue
+                        fc_mat = load_connectivity_matrix(fc_path, isheader=True)
                 else:
                     matname = '{}.csv'.format(subj_for_file)
                     sc_mat = load_connectivity_matrix(osp.join(netDir, sc_netnames[0], matname))

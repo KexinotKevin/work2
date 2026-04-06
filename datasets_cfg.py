@@ -15,7 +15,7 @@ atlases = {
 
 datasets = {
     "HCD":{
-        "conn_dir": "/public/home/baitianyu/kexin/datasets/HCD/network",
+        "conn_dir": "/public/home/baitianyu/kexin/datasets/HCD/network_mat/bna246",
         "scores_path": "/public/home/baitianyu/kexin/datasets/HCD/textfiles/cogcomp.csv",
         "demographics_path":"/public/home/baitianyu/kexin/datasets/HCD/textfiles/HCD_LS_2.0_subject_completeness.csv",
         "tgt_label_list": ['src_subject_id', 'sex', 'interview_age', 
