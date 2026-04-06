@@ -10,21 +10,47 @@ from dataset import dataset
 from baseline_models.models.vanilla_gnn import VanillaGCN, VanillaGAT, VanillaSAGE, VanillaRelGNN
 from strategies import EarlyStopping
 
+
+def safe_pearsonr(x, y, eps=1e-12):
+    """Pearson r 与 p；若样本不足或任一侧为常数则相关系数无定义，返回 (nan, nan) 且不触发 scipy 警告。"""
+    from scipy.stats import pearsonr
+
+    x = np.asarray(x, dtype=np.float64).ravel()
+    y = np.asarray(y, dtype=np.float64).ravel()
+    mask = np.isfinite(x) & np.isfinite(y)
+    x, y = x[mask], y[mask]
+    if x.size < 2:
+        return np.nan, np.nan
+    if np.std(x) <= eps or np.std(y) <= eps:
+        return np.nan, np.nan
+    return pearsonr(x, y)
+
+
 # 导入 BrainGNN 源码
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../models/BrainGNN_Pytorch')))
 from net.braingnn import Network as BrainGNN
+
+# ==================== BrainRGIN 适配器 ====================
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../models/BrainRGIN-main')))
+try:
+    from net.rgin_garo_model import CustomNetworkWithGARO
+except ImportError:
+    pass
+# =========================================================
 
 
 def transform_batch(g_data, args, device):
     """Transforms raw graph data into Baseline format without modifying load_data.py.
     
-    This function reconstructs dense matrices from the compressed edge_attr and
-    assigns them as node features. For RelGNN, edge attributes are preserved for
-    dual-relation modeling (SC_FA and FC_pos). For GCN/GAT/SAGE, edge_attr is
-    discarded and the models operate on topology + numerical node features only.
+    模型设计意图：
+    - RelGNN: SC_FC 时 SC 作边属性，FC 作节点特征；单模态时模态本身既当边权重又当节点特征
+    - BrainGNN/BrainRGIN: 原设计使用邻接矩阵作为节点特征，边权重作为 edge_attr
+    - GCN/GAT/SAGE/GraphTransformer/BNT: 标准 GNN，单模态用邻接矩阵行向量作节点特征，SC_FC 拼接
+    - BrainNetCNN: E2E 卷积设计
     """
     sc_dim = len(args.sc_kinds_resolved)
     x_list = []
+    edge_attr_list = []
 
     for i in range(g_data.num_graphs):
         mask = g_data.batch == i
@@ -39,19 +65,49 @@ def transform_batch(g_data, args, device):
         adj_fc[e_idx[0], e_idx[1]] = g_data.edge_attr[e_mask, sc_dim] - g_data.edge_attr[e_mask, sc_dim + 1]
 
         if args.model_type == "RelGNN":
+            # RelGNN: FC 作节点特征
             x_list.append(adj_fc)
+            if args.modality == 'SC_FC':
+                # SC_FC: SC 作为边属性（2通道：[SC, FC_pos]）
+                edge_attr_list.append(g_data.edge_attr[e_mask][:, [0, sc_dim]])
+            else:
+                # 单模态: 模态本身作为边权重
+                if args.modality == 'SC':
+                    edge_attr_list.append(g_data.edge_attr[e_mask, 0:1])  # [SC]
+                else:  # FC
+                    edge_attr_list.append(g_data.edge_attr[e_mask, sc_dim:sc_dim+1])  # [FC_pos]
+        elif args.model_type in ["BrainGNN", "BrainRGIN"]:
+            # BrainGNN/BrainRGIN: 邻接矩阵行向量作节点特征
+            if args.modality == 'SC':
+                x_list.append(adj_sc)
+                edge_attr_list.append(g_data.edge_attr[e_mask, 0:1])  # SC 边值
+            elif args.modality == 'FC':
+                x_list.append(adj_fc)
+                edge_attr_list.append((g_data.edge_attr[e_mask, sc_dim:sc_dim+1]))  # FC_pos
+            else:  # SC_FC
+                x_list.append(torch.cat([adj_sc, adj_fc], dim=-1))
+                edge_attr_list.append(None)  # SC_FC 不使用边权重
         else:
+            # GCN/GAT/SAGE/GraphTransformer/BNT/BrainNetCNN: 标准设计
             if args.modality == 'SC':
                 x_list.append(adj_sc)
             elif args.modality == 'FC':
                 x_list.append(adj_fc)
-            elif args.modality == 'SC_FC':
+            else:  # SC_FC
                 x_list.append(torch.cat([adj_sc, adj_fc], dim=-1))
+            edge_attr_list.append(None)
 
     g_data.x = torch.cat(x_list, dim=0).to(device)
 
+    # 设置边权重
     if args.model_type == "RelGNN":
-        g_data.edge_attr = g_data.edge_attr[:, [0, sc_dim]].to(device)
+        g_data.edge_attr = torch.cat(edge_attr_list, dim=0).to(device)
+    elif args.model_type in ["BrainGNN", "BrainRGIN"]:
+        # 检查是否所有模态都需要边权重
+        if any(e is None for e in edge_attr_list):
+            g_data.edge_attr = None
+        else:
+            g_data.edge_attr = torch.cat(edge_attr_list, dim=0).to(device)
     else:
         g_data.edge_attr = None
 
@@ -105,6 +161,185 @@ class BrainGNNWrapper(torch.nn.Module):
         # 【填坑 4：精度升回 Float64】
         # 传回给你自己的 Pipeline 计算 Loss，必须升回 float64 对齐真实标签
         return pred.to(torch.float64), None, None
+# =========================================================
+
+# ==================== BrainNetworkTransformer 适配器组 ====================
+import sys
+import os
+
+# 将 BNT 源码路径加入系统环境变量
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../models/BrainNetworkTransformer-main/source')))
+
+# 只有在用到这些模型时才延迟加载，避免找不到路径
+try:
+    from models.brainnetcnn import BrainNetCNN
+    from models.transformer import GraphTransformer
+    from models.BNT.bnt import BrainNetworkTransformer
+except ImportError:
+    pass
+
+class DummyConfig:
+    """伪装成 OmegaConf 的配置类，防止破坏原代码环境"""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            if isinstance(v, dict):
+                setattr(self, k, DummyConfig(**v))
+            else:
+                setattr(self, k, v)
+
+
+class BrainNetCNNWrapper(torch.nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.num_nodes = args.num_nodes
+        cfg = DummyConfig(dataset=dict(node_sz=self.num_nodes))
+        self.model = BrainNetCNN(cfg)
+        
+        # 补丁 1：强制将最后的分类层 (2维) 改为回归层 (1维)
+        self.model.dense3 = torch.nn.Linear(30, args.output_dimension)
+        self.use_grl = False
+        
+        # 补丁 2：处理 SC_FC 双模态输入
+        if args.modality == 'SC_FC':
+            from models.brainnetcnn import E2EBlock
+            self.model.e2econv1 = E2EBlock(2, 32, self.num_nodes, bias=True)
+
+        # 与 BrainGNN 相同：全局 float64 下 Conv/Linear 权重为 double，与 forward 里 float 输入不一致
+        self.model = self.model.float()
+
+    def forward(self, g_data, dummy_lb, batch):
+        batch_size = g_data.num_graphs
+        # 从 transform_batch 获取的稠密矩阵 (Batch * N, Channels * N)
+        # 补丁 3：转换为 float32 防止精度崩溃
+        x_dense = g_data.x.view(batch_size, self.num_nodes, -1).float()
+        
+        if x_dense.shape[-1] == self.num_nodes * 2: # SC_FC 模式
+            sc = x_dense[:, :, :self.num_nodes]
+            fc = x_dense[:, :, self.num_nodes:]
+            # 组装为 (Batch, Channels, N, N) 手动前向传播以绕过源码强制的 unsqueeze
+            node_feat = torch.stack([sc, fc], dim=1)
+            out = F.leaky_relu(self.model.e2econv1(node_feat), negative_slope=0.33)
+            out = F.leaky_relu(self.model.e2econv2(out), negative_slope=0.33)
+            out = F.leaky_relu(self.model.E2N(out), negative_slope=0.33)
+            out = F.dropout(F.leaky_relu(self.model.N2G(out), negative_slope=0.33), p=0.5, training=self.training)
+            out = out.view(out.size(0), -1)
+            out = F.dropout(F.leaky_relu(self.model.dense1(out), negative_slope=0.33), p=0.5, training=self.training)
+            out = F.dropout(F.leaky_relu(self.model.dense2(out), negative_slope=0.33), p=0.5, training=self.training)
+            pred = F.leaky_relu(self.model.dense3(out), negative_slope=0.33)
+        else: # 单模态模式
+            pred = self.model(None, x_dense)
+            
+        # 补丁 4：恢复为 float64 交还给流水线计算 Loss
+        return pred.to(torch.float64), None, None
+
+
+class GraphTransformerWrapper(torch.nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.num_nodes = args.num_nodes
+        feature_sz = self.num_nodes if args.modality != 'SC_FC' else self.num_nodes * 2
+        
+        cfg = DummyConfig(
+            dataset=dict(node_sz=self.num_nodes, node_feature_sz=feature_sz),
+            model=dict(self_attention_layer=2, readout='sum')
+        )
+        self.model = GraphTransformer(cfg)
+        
+        # 转换为 1 维回归输出
+        self.model.fc[-1] = torch.nn.Linear(32, args.output_dimension)
+        self.use_grl = False
+        self.model = self.model.float()
+
+    def forward(self, g_data, dummy_lb, batch):
+        batch_size = g_data.num_graphs
+        x_dense = g_data.x.view(batch_size, self.num_nodes, -1).float()
+        pred = self.model(None, x_dense)
+        return pred.to(torch.float64), None, None
+
+
+class BNTWrapper(torch.nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.num_nodes = args.num_nodes
+        feature_sz = self.num_nodes if args.modality != 'SC_FC' else self.num_nodes * 2
+
+        cfg = DummyConfig(
+            dataset=dict(node_sz=feature_sz), # 使用 feature_sz 兼容拼接的多模态特征
+            model=dict(
+                pos_encoding='identity',
+                pos_embed_dim=self.num_nodes,
+                sizes=[feature_sz, self.num_nodes//2],
+                pooling=[False, True],
+                orthogonal=True,
+                freeze_center=False,
+                project_assignment=True
+            )
+        )
+        self.model = BrainNetworkTransformer(cfg)
+        self.model.fc[-1] = torch.nn.Linear(32, args.output_dimension)
+        self.use_grl = False
+        self.model = self.model.float()
+
+    def forward(self, g_data, dummy_lb, batch):
+        batch_size = g_data.num_graphs
+        x_dense = g_data.x.view(batch_size, self.num_nodes, -1).float()
+        pred = self.model(None, x_dense)
+        return pred.to(torch.float64), None, None
+# =========================================================================
+
+
+# ==================== BrainRGIN 适配器 ====================
+class BrainRGINWrapper(torch.nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.num_nodes = args.num_nodes
+
+        # 遵循 BrainRGIN 原始架构设计的超参数（参考其 WANDB 扫参范围设定）
+        n_hidden_layers = [64, 64]  # 图卷积隐藏层维度
+        n_fc_layers = [32, 16]      # 全连接层维度
+
+        self.model = CustomNetworkWithGARO(
+            indim=self.num_nodes,
+            ratio=0.5,  # 默认的 TopKPooling 保留率
+            nclass=args.output_dimension,  # 输出维度 (回归为 1)
+            n_hidden_layers=n_hidden_layers,
+            n_fc_layers=n_fc_layers,
+            k=8,  # 原作设定的默认社区数
+            R=self.num_nodes  # 必须传入真实的 ROI 数量
+        )
+        self.use_grl = False
+        # 强制 float32 以匹配模型内部计算精度
+        self.model = self.model.float()
+
+    def forward(self, g_data, dummy_lb, batch):
+        # BrainRGIN 原设计：同一模态既当节点特征又当边加权
+        # transform_batch 已经正确设置了 edge_attr，直接使用
+
+        batch_size = g_data.num_graphs
+
+        # 1. 节点特征：取前 num_nodes 维（邻接矩阵行向量）
+        x_f32 = g_data.x[:, :self.num_nodes].float()
+
+        # 2. 边权重：transform_batch 已设置，直接使用
+        if g_data.edge_attr is not None:
+            if g_data.edge_attr.dim() > 1:
+                edge_weight_f32 = g_data.edge_attr[:, 0].float()
+            else:
+                edge_weight_f32 = g_data.edge_attr.float()
+        else:
+            edge_weight_f32 = None
+
+        # 3. 身份编码对齐
+        pos_f32 = x_f32
+
+        # 4. 构建批次标签
+        batch_nodes = torch.arange(batch_size, device=g_data.x.device).repeat_interleave(self.num_nodes)
+
+        # 5. 原生前向传播
+        out, allpools, scores = self.model(x_f32, g_data.edge_index, batch_nodes, edge_weight_f32, pos_f32)
+
+        # 6. 取出主预测结果并恢复至 float64 对齐损失函数
+        return out.to(torch.float64), None, None
 # =========================================================
 
 
@@ -194,8 +429,8 @@ def train_baseline(args, model, trainloader, valloader, optimizer, device, label
             g_data, lb_data = g_data.to(device), lb_data.to(device)
 
             # --- 修改位置 ---
-            # 如果是 BrainGNN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
-            if args.model_type not in ["BrainGNN"]:
+            # 如果是 BrainGNN/BrainRGIN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
+            if args.model_type not in ["BrainGNN", "BrainRGIN"]:
                 g_data = transform_batch(g_data, args, device)
             # ---------------
 
@@ -231,8 +466,8 @@ def train_baseline(args, model, trainloader, valloader, optimizer, device, label
                 g_data, lb_data = g_data.to(device), lb_data.to(device)
 
                 # --- 修改位置 ---
-                # 如果是 BrainGNN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
-                if args.model_type not in ["BrainGNN"]:
+                # 如果是 BrainGNN/BrainRGIN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
+                if args.model_type not in ["BrainGNN", "BrainRGIN"]:
                     g_data = transform_batch(g_data, args, device)
                 # ---------------
 
@@ -283,7 +518,6 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
     model_t.eval()
 
     from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
-    from scipy.stats import pearsonr
 
     total_rmse, total_mae, total_r2, total_p = [], [], [], []
     total_bias_age_corr = []  # 新增：预测认知分数与真实年龄的相关性（偏误指标）
@@ -297,8 +531,8 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
                 lb_test = lb_test.to(device)
 
                 # --- 修改位置 ---
-                # 如果是 BrainGNN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
-                if args.model_type not in ["BrainGNN"]:
+                # 如果是 BrainGNN/BrainRGIN，绝对不要将其转化成 Dense 矩阵，保持稀疏状态
+                if args.model_type not in ["BrainGNN", "BrainRGIN"]:
                     g_test = transform_batch(g_test, args, device)
                 # ---------------
 
@@ -316,19 +550,20 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
             total_rmse.append(root_mean_squared_error(lb_test, lb_pred))
             total_mae.append(mean_absolute_error(lb_test, lb_pred))
             total_r2.append(r2_score(lb_test, lb_pred))
-            total_p.append(pearsonr(lb_test, lb_pred)[0])
+            r_main, _ = safe_pearsonr(lb_test, lb_pred)
+            total_p.append(r_main)
 
             # 计算偏误指标：预测认知分数与真实年龄的 Pearson 相关性
             # 理想情况：作弊模型该值会很高(>0.5)，带 GRL 的模型趋近于 0
-            bias_corr, _ = pearsonr(lb_pred, age_test)
+            bias_corr, _ = safe_pearsonr(lb_pred, age_test)
             total_bias_age_corr.append(bias_corr)
 
     print(f"Test Results over {args.test_repeat} repeats:")
     print(f"  RMSE: {np.mean(total_rmse):.4f} ± {np.std(total_rmse):.4f}")
     print(f"  MAE:  {np.mean(total_mae):.4f} ± {np.std(total_mae):.4f}")
     print(f"  R2:   {np.mean(total_r2):.4f} ± {np.std(total_r2):.4f}")
-    print(f"  Pearson r: {np.mean(total_p):.4f} ± {np.std(total_p):.4f}")
-    print(f"  >>> Bias Metric (Pred Cog vs True Age r): {np.mean(total_bias_age_corr):.4f} ± {np.std(total_bias_age_corr):.4f}")
+    print(f"  Pearson r: {np.nanmean(total_p):.4f} ± {np.nanstd(total_p):.4f}")
+    print(f"  >>> Bias Metric (Pred Cog vs True Age r): {np.nanmean(total_bias_age_corr):.4f} ± {np.nanstd(total_bias_age_corr):.4f}")
 
     df2 = pd.DataFrame({
         "repeat_rmse": total_rmse,
@@ -347,10 +582,10 @@ def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_st
         "MAE_std": np.std(total_mae),
         "R2": np.mean(total_r2),
         "R2_std": np.std(total_r2),
-        "Pearson_r": np.mean(total_p),
-        "Pearson_r_std": np.std(total_p),
-        "Bias_Age_Corr": np.mean(total_bias_age_corr),
-        "Bias_Age_Corr_std": np.std(total_bias_age_corr),
+        "Pearson_r": float(np.nanmean(total_p)),
+        "Pearson_r_std": float(np.nanstd(total_p)),
+        "Bias_Age_Corr": float(np.nanmean(total_bias_age_corr)),
+        "Bias_Age_Corr_std": float(np.nanstd(total_bias_age_corr)),
     }
     return summary_results
 
@@ -391,6 +626,12 @@ def save_summary_results(output_root, timestamp, model_type, modality, labels, a
     timestamp_dir = os.path.join(output_root, timestamp)
     os.makedirs(timestamp_dir, exist_ok=True)
     summary_path = os.path.join(timestamp_dir, "summary_results.csv")
+    
+    # 如果文件已存在，读取并追加新行，而不是覆盖
+    if os.path.exists(summary_path):
+        existing_df = pd.read_csv(summary_path)
+        summary_df = pd.concat([existing_df, summary_df], ignore_index=True)
+    
     summary_df.to_csv(summary_path, index=False)
     print(f"\n>>> Summary results saved to: {summary_path}")
     
@@ -399,7 +640,7 @@ def save_summary_results(output_root, timestamp, model_type, modality, labels, a
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Baseline GNN run entry")
-    parser.add_argument("--model_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE", "RelGNN", "BrainGNN"])
+    parser.add_argument("--model_type", type=str, default="GCN", choices=["GCN", "GAT", "SAGE", "RelGNN", "BrainGNN", "BrainNetCNN", "GraphTransformer", "BNT", "BrainRGIN"])
     parser.add_argument("--modality", type=str, default="SC", choices=["SC", "FC", "SC_FC"])
 
     parser.add_argument("--dataset_class", type=str, default="dataset", choices=["dataset"])
@@ -546,7 +787,17 @@ def main():
         testloader = dt.test_dataloader()
         print("dataset loaded for label: {}".format(label))
 
-        model_map = {"GCN": VanillaGCN, "GAT": VanillaGAT, "SAGE": VanillaSAGE, "RelGNN": VanillaRelGNN, "BrainGNN": BrainGNNWrapper}
+        model_map = {
+            "GCN": VanillaGCN,
+            "GAT": VanillaGAT,
+            "SAGE": VanillaSAGE,
+            "RelGNN": VanillaRelGNN,
+            "BrainGNN": BrainGNNWrapper,         # 之前加的
+            "BrainNetCNN": BrainNetCNNWrapper,   # 新增
+            "GraphTransformer": GraphTransformerWrapper, # 新增
+            "BNT": BNTWrapper,                   # 新增
+            "BrainRGIN": BrainRGINWrapper        # 新增
+        }
         model = model_map[args.model_type](args).to(device)
 
         optimizer = torch.optim.AdamW(

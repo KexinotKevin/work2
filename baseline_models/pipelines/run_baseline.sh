@@ -11,16 +11,21 @@ export PYTHONPATH="$(pwd)/../../":$PYTHONPATH
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_ROOT="../results/debug_baseline/${TIMESTAMP}"
 
-# MODELS=("GCN" "GAT" "SAGE" "RelGNN" "BrainGNN")
-MODELS=("BrainGNN")
-# MODALITIES=("SC" "FC" "SC_FC")
-MODALITIES=("SC" "FC")
+# MODELS=("GCN" "GAT" "SAGE" "RelGNN" "BrainGNN" "BrainNetCNN" "GraphTransformer" "BNT")
+# 加入新的三个模型
+MODELS=("BrainRGIN")
+MODALITIES=("SC" "FC" "SC_FC")
+# MODALITIES=("SC" "FC")
 
 for MODEL in "${MODELS[@]}"; do
     for MOD in "${MODALITIES[@]}"; do
         
         # RelGNN 强绑定 SC和FC的输入机制，单模态跳过
         if [ "$MODEL" == "RelGNN" ] && [ "$MOD" != "SC_FC" ]; then
+            continue
+        fi
+
+        if [ "$MODEL" == "BNT" ] && [ "$MOD" == "SC_FC" ]; then
             continue
         fi
 

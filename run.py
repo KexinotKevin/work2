@@ -415,7 +415,7 @@ def parse_args():
     parser.add_argument("--output_dimension", type=int, default=1)
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--dropout", type=float, default=0.5)
-    parser.add_argument("--pool_ratio", type=float, nargs="+", default=[0.5, 0.8, 0.5])
+    parser.add_argument("--pool_ratio", type=float, nargs="+", default=[0.8, 0.8, 0.8])
 
     parser.add_argument("--split_ratio", type=float, nargs=3, default=[0.7, 0.15, 0.15])
     parser.add_argument("--seed", type=int, default=42)

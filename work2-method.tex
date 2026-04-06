@@ -1,0 +1,2610 @@
+% !TeX root = ../bnuthesis-example.tex
+
+\chapter{研究二算法设计与实现}
+
+\section{引言}
+
+本项目开发了一套基于图神经网络的脑认知功能预测框架。核心任务是将大脑区域间的结构连接（Structural Connectivity, SC）和功能连接（Functional Connectivity, FC）建模为图结构数据，利用深度学习方法从这些复杂的脑网络数据中学习特征表示，最终预测个体的认知功能评分。
+
+模型采用编码器-解码器架构，其中编码器部分通过层级图卷积和池化操作提取多尺度图特征，解码器部分用于图重构（可选）。模型名称中的"LG"代表Label-Guided（标签引导），表明模型利用认知评分标签来引导图池化过程，实现更具判别性的节点选择。
+
+\newpage
+
+\section{总体模型结构}
+
+\subsection{网络架构概述}
+
+LGUNet模型的整体架构可分为以下几个主要组件：
+
+\begin{enumerate}
+    \item \textbf{输入层}：RGCN（关系图卷积网络）层，用于处理多关系边特征
+    \item \textbf{编码器（下采样）}：$D$层堆叠的(LGMVPool + RGCN/relationGCN)组合
+    \item \textbf{Readout层}：结合Global Mean Pooling和Global Max Pooling
+    \item \textbf{预测头}：三层全连接网络，输出认知评分预测值
+    \item \textbf{解码器（上采样）}：可选的GCN上采样层，用于图重构任务
+\end{enumerate}
+
+\subsection{模型数学表达}
+
+设输入图为 $\mathcal{G} = (\mathbf{X}, \mathbf{A}, \mathbf{E})$，其中：
+\begin{itemize}
+    \item $\mathbf{X} \in \mathbb{R}^{N \times F}$：节点特征矩阵，$N$ 为节点数（脑区数），$F$ 为特征维度
+    \item $\mathbf{A} \in \mathbb{R}^{N \times N}$：邻接矩阵（可表示为边索引）
+    \item $\mathbf{E} \in \mathbb{R}^{E \times R}$：边属性矩阵，$E$ 为边数，$R$ 为关系类型数（本文中 $R=3$）
+\end{itemize}
+
+边的三种关系类型分别编码：
+\begin{itemize}
+    \item 通道0：结构连接特征（如FA、纤维计数）
+    \item 通道1：功能连接正值
+    \item 通道2：功能连接负值
+\end{itemize}
+
+模型的前向传播过程可表示为：
+
+\begin{equation}
+\mathbf{X}^{(0)}, \mathbf{A}^{(0)}, \mathbf{E}^{(0)} = \text{InputLayer}(\mathbf{X}, \mathbf{A}, \mathbf{E})
+\end{equation}
+
+\begin{equation}
+\mathbf{X}^{(l+1)}, \mathbf{A}^{(l)}, \mathbf{E}^{(l)} = \text{RGCN}\left(\mathbf{X}^{(l)}, \mathbf{A}^{(l)}, \mathbf{E}^{(l)}\right), \quad l = 0, 1, \ldots, D-1
+\end{equation}
+
+\begin{equation}
+\mathbf{X}^{(l+1)}, \mathbf{A}^{(l+1)}, \mathbf{E}^{(l+1)}, \text{perm}^{(l)} = \text{LGMVPool}\left(\mathbf{X}^{(l)}, \mathbf{A}^{(l)}, \mathbf{E}^{(l)}, \mathbf{y}\right)
+\end{equation}
+
+其中 $D$ 为编码器深度，$\text{perm}^{(l)}$ 为第 $l$ 层池化后保留的节点索引。
+
+最终的图级表示通过Readout层获得：
+
+\begin{equation}
+\mathbf{h}_g = \text{Readout}(\mathbf{X}^{(0)}, \mathbf{X}^{(1)}, \ldots, \mathbf{X}^{(D)}) = \sum_{l=0}^{D} \left[ \text{GAP}(\mathbf{X}^{(l)}) \oplus \text{GMP}(\mathbf{X}^{(l)}) \right]
+\end{equation}
+
+其中 $\oplus$ 表示向量拼接操作，GAP为全局平均池化，GMP为全局最大池化。
+
+预测输出为：
+
+\begin{equation}
+\hat{y} = \mathbf{W}_3 \cdot \sigma\left(\mathbf{W}_2 \cdot \sigma\left(\mathbf{W}_1 \cdot \mathbf{h}_g + \mathbf{b}_1\right) + \mathbf{b}_2\right) + \mathbf{b}_3
+\end{equation}
+
+其中 $\sigma(\cdot)$ 为ReLU激活函数，$\mathbf{W}_i, \mathbf{b}_i$ 为可学习参数。
+
+\newpage
+
+\section{核心模块设计}
+
+\subsection{关系图卷积网络（RelationGCN）}
+
+\subsubsection{标准RelationGCN层}
+
+RelationGCN层扩展了传统图卷积网络以处理多关系图数据。其核心思想是为每种关系类型学习独立的变换矩阵。
+
+对于输入节点特征 $\mathbf{X} \in \mathbb{R}^{N \times F_{\text{in}}}$，RelationGCN的输出为：
+
+\begin{equation}
+\mathbf{X}' = \sigma\left( \sum_{r=1}^{R} \tilde{\mathbf{D}}_r^{-1/2} \tilde{\mathbf{A}}_r \tilde{\mathbf{D}}_r^{-1/2} \mathbf{X} \mathbf{W}_r + \mathbf{b} \right)
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $R$：关系类型总数
+    \item $\mathbf{W}_r \in \mathbb{R}^{F_{\text{in}} \times F_{\text{out}}}$：第 $r$ 种关系的变换矩阵
+    \item $\tilde{\mathbf{A}}_r = \mathbf{A}_r + \mathbf{I}$：加入自环的邻接矩阵
+    \item $\tilde{\mathbf{D}}_r$：对应的度矩阵
+\end{itemize}
+
+归一化系数计算：
+
+\begin{equation}
+\mathbf{E}^{\text{norm}}_{ij,r} = \frac{e_{ij,r}}{\sqrt{d_i^r \cdot d_j^r}}
+\end{equation}
+
+其中 $e_{ij,r}$ 为第 $r$ 种关系的边权重，$d_i^r = \sum_j e_{ij,r}$ 为节点 $i$ 在第 $r$ 种关系下的度。
+
+当关系数较多时，为减少参数量，模型支持基分解（Basis Decomposition）：
+
+\begin{equation}
+\mathbf{W}_r = \sum_{b=1}^{B} a_{rb} \mathbf{V}_b
+\end{equation}
+
+其中 $\mathbf{V}_b$ 为基矩阵，$a_{rb}$ 为可学习的系数，$B$ 为基的数量。
+
+\subsubsection{带注意力的RGCN层}
+
+RGCN层在标准RelationGCN基础上增加了注意力机制，用于自适应调整不同关系边的贡献权重。
+
+\begin{equation}
+\alpha_{ij,r} = \frac{\exp\left(\mathbf{a}_r^{\top} \cdot \mathbf{e}_{ij}\right)}{\sum_{r'=1}^{R} \exp\left(\mathbf{a}_{r'}^{\top} \cdot \mathbf{e}_{ij}\right)}
+\end{equation}
+
+其中 $\mathbf{e}_{ij} = [\mathbf{E}_{ij,1}, \mathbf{E}_{ij,2}, \mathbf{E}_{ij,3}]$ 为边属性向量，$\mathbf{a}_r$ 为第 $r$ 种关系的注意力向量。
+
+消息传递过程：
+
+\begin{equation}
+\mathbf{x}'_i = \sigma\left( \sum_{r=1}^{R} \sum_{j \in \mathcal{N}_i^r} \alpha_{ij,r} \cdot \mathbf{E}_{ij,r}^{\text{norm}} \cdot \mathbf{x}_j \cdot \mathbf{W}_r + \mathbf{b} \right)
+\end{equation}
+
+注意：当前实现中注意力权重通过边属性与可学习注意力图 $\mathbf{M} \in \mathbb{R}^{R \times 3}$ 计算：
+
+\begin{equation}
+\alpha_{ij,r} = \sum_{c=1}^{3} \mathbf{M}_{r,c} \cdot \mathbf{E}_{ij,c}
+\end{equation}
+
+边权重更新：
+
+\begin{equation}
+\mathbf{E}'_{ij,r} = \mathbf{E}_{ij,r}^{\text{norm}} \cdot \alpha_{ij,r}
+\end{equation}
+
+\subsection{PageRank评分计算}
+
+PageRank算法用于评估图中节点的重要性。模型在边属性处理中集成了PageRank计算。
+
+对于无向图，PageRank迭代计算公式为：
+
+\begin{equation}
+\text{PR}^{(k+1)}_i = (1 - \alpha) \cdot \sum_{j \in \mathcal{N}_i} \frac{e_{ji}}{\sum_{k \in \mathcal{N}_j} e_{jk}} \cdot \text{PR}^{(k)}_j + \frac{\alpha}{N}
+\end{equation}
+
+其中 $\alpha$ 为阻尼系数（本文取0.1），$N$ 为节点总数，$k$ 为迭代次数。
+
+对于多关系图，模型为每种关系类型独立计算PageRank分数，然后取平均：
+
+\begin{equation}
+\text{PR}_i^{\text{final}} = \frac{1}{R} \sum_{r=1}^{R} \text{PR}_{i,r}^{(K)}
+\end{equation}
+
+其中 $K$ 为最终迭代次数（默认10）。
+
+在边属性更新中，PageRank分数用于选择最重要的关系类型：
+
+\begin{equation}
+r_i^* = \arg\max_r \text{PR}_{i,r}^{(K)}
+\end{equation}
+
+新的边属性为 $[\mathbf{E}_{ij,r_i^*}, r_i^*]$。
+
+\begin{algorithm}
+  \centering
+  \caption{多关系图PageRank计算算法}
+  \label{alg:pagerank}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\mathcal{G} = (\mathbf{X}, \mathbf{A}, \mathbf{E})$：脑网络图；$K$：迭代次数；$\alpha$：阻尼系数
+  \ENSURE $\mathbf{PR} \in \mathbb{R}^{N \times R}$：各节点的PageRank分数矩阵
+
+  \STATE \COMMENT{初始化：均匀分布}
+  \STATE $\mathbf{PR}^{(0)} \leftarrow \frac{1}{N} \cdot \mathbf{1}_{N \times R}$
+  \STATE \COMMENT{对每种关系类型独立计算PageRank}
+  \FOR{$r = 1 \textbf{ to } R$}
+    \STATE $\mathbf{e}_r \leftarrow \mathbf{E}_{:, r}$
+    \STATE $(\mathbf{A}, \mathbf{norm}_r) \leftarrow \text{NormalizeEdgeWeight}(\mathbf{A}, \mathbf{e}_r)$
+    \FOR{$k = 1 \textbf{ to } K$}
+      \STATE \COMMENT{消息传递：聚合邻居节点的PageRank分数}
+      \STATE $\mathbf{PR}_{\text{new}, r} \leftarrow \texttt{AGGREGATE}(\mathbf{PR}^{(k-1)}_{:, r}, \mathbf{A}, \mathbf{norm}_r)$
+      \STATE \COMMENT{阻尼更新}
+      \STATE $\mathbf{PR}^{(k)}_{:, r} \leftarrow (1 - \alpha) \cdot \mathbf{PR}_{\text{new}, r} + \frac{\alpha}{N}$
+    \ENDFOR
+  \ENDFOR
+  \STATE \COMMENT{多关系聚合}
+  \STATE $\mathbf{PR}^{\text{final}} \leftarrow \frac{1}{R} \sum_{r=1}^{R} \mathbf{PR}^{(K)}_{:, r}$
+  \RETURN $\mathbf{PR}^{\text{final}}$
+  \STATE \COMMENT{辅助函数：边权重归一化}
+  \STATE \textbf{Function} \texttt{NormalizeEdgeWeight}$(\mathbf{A}, \mathbf{e})$
+    \STATE $\mathbf{d} \leftarrow \text{scatter\_add}(\mathbf{e}, \mathbf{A}[0])$
+    \STATE $\mathbf{d}_{\text{inv}} \leftarrow \mathbf{d}^{-1/2}$，其中 $\mathbf{d}_{\text{inv}}[d_i = \infty] = 0$
+    \STATE $\mathbf{norm} \leftarrow \mathbf{d}_{\text{inv}}[\mathbf{A}[0]] \cdot \mathbf{e} \cdot \mathbf{d}_{\text{inv}}[\mathbf{A}[1]]$
+    \RETURN $(\mathbf{A}, \mathbf{norm})$
+  \STATE \textbf{End Function}
+  \end{algorithmic}
+\end{algorithm}
+
+\newpage
+
+LGMVPool是模型的核心创新模块，通过融合多种评分机制实现自适应的图结构简化。
+
+\subsubsection{节点评分函数}
+
+池化过程首先为每个节点计算综合评分 $s_i$：
+
+\begin{equation}
+s_i = \frac{1}{2} \left( s_i^{\text{deg}} + s_i^{\text{pr}} \right)
+\end{equation}
+
+其中 $s_i^{\text{deg}}$ 基于节点度，$s_i^{\text{pr}}$ 基于PageRank分数。
+
+\textbf{度评分：}
+\begin{equation}
+s_i^{\text{deg}} = \sigma\left( \alpha \cdot \log(d_i + \epsilon) \right)
+\end{equation}
+其中 $d_i = \sum_j e_{ij}$ 为节点 $i$ 的加权度，$\alpha$ 为可学习参数，$\sigma$ 为Sigmoid函数，$\epsilon = 10^{-16}$ 防止数值问题。
+
+\textbf{PageRank评分：}
+\begin{equation}
+s_i^{\text{pr}} = \sigma\left( \beta \cdot \text{PR}_i^{\text{final}} \right)
+\end{equation}
+其中 $\beta$ 为可学习参数。
+
+\subsubsection{节点选择}
+
+使用Top-K选择策略保留比例 $p$ 的重要节点：
+
+\begin{equation}
+\text{perm} = \text{topk}(\mathbf{s}, p) = \left\{ i \mid s_i \text{ 在前 } \lceil pN \rceil \text{ 个评分中} \right\}
+\end{equation}
+
+保留节点的更新表示：
+\begin{equation}
+\mathbf{x}'_i = \mathbf{x}_{\text{perm}[i]} \odot \mathbf{s}_{\text{perm}[i]}, \quad i = 1, 2, \ldots, \lceil pN \rceil
+\end{equation}
+其中 $\odot$ 为逐元素乘法。
+
+邻接矩阵和边属性通过过滤操作更新：
+\begin{equation}
+(\mathbf{A}', \mathbf{E}') = \text{filter\_adj}(\mathbf{A}, \mathbf{E}, \text{perm})
+\end{equation}
+
+仅保留两端节点都在perm中的边。
+
+\subsubsection{边结构学习}
+
+LGMVPool包含可学习的边权重更新机制，实现隐式的图结构学习。
+
+首先计算注意力分数：
+\begin{equation}
+a_{ij} = \mathbf{a}^{\top} \cdot \left[ \mathbf{x}'_i \parallel \mathbf{x}'_j \right]
+\end{equation}
+其中 $\mathbf{a} \in \mathbb{R}^{2F_{\text{out}}}$ 为注意力参数，$\parallel$ 为拼接操作。
+
+LeakyReLU激活：
+\begin{equation}
+\tilde{a}_{ij} = \text{LeakyReLU}(a_{ij}, \delta)
+\end{equation}
+其中 $\delta$ 为负斜率（默认0.2）。
+
+边权重融合：
+\begin{equation}
+w_{ij,r}^{\text{new}} = \lambda \cdot \mathbf{E}'_{ij,r} + \tilde{a}_{ij}
+\end{equation}
+其中 $\lambda$ 为结构学习权重参数。
+
+\textbf{Sparsemax归一化：}
+\begin{equation}
+\mathbf{w}^{\text{sparse}}_r = \text{Sparsemax}(\mathbf{w}^{\text{new}}_r, \text{batch})
+\end{equation}
+
+Sparsemax函数定义为：
+\begin{equation}
+\text{Sparsemax}(z)_i = \begin{cases}
+z_i - \tau & \text{if } z_i - \tau > 0 \\
+0 & \text{otherwise}
+\end{cases}
+\end{equation}
+其中阈值 $\tau$ 通过以下方式确定：
+\begin{equation}
+\tau = \max \left\{ \theta \mid \sum_{i: z_i > \theta} (z_i - \theta) \leq 1 \right\}
+\end{equation}
+
+Sparsemax相比Softmax具有稀疏性，可以产生真正的零值注意力，这对于图结构学习尤为重要。
+
+边属性最终更新为Sparsemax处理后的结果，并过滤掉权重为零的边。
+
+\begin{algorithm}
+  \centering
+  \caption{LGMVPool：多视图图池化层}
+  \label{alg:lgmvpool}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\mathbf{x} \in \mathbb{R}^{N \times F}$：节点特征；$\mathbf{A} \in \mathbb{R}^{2 \times E}$：边索引；$\mathbf{E} \in \mathbb{R}^{E \times R}$：边属性；$\mathbf{y}$：标签向量；$p$：池化比例；$\lambda$：结构学习权重
+  \ENSURE $\mathbf{x}'$：池化后节点特征；$\mathbf{A}'$：更新后边索引；$\mathbf{E}'$：更新后边属性；$\text{perm}$：保留节点索引
+
+  \STATE \COMMENT{步骤1：计算节点评分}
+  \STATE $\mathbf{d} \leftarrow \text{degree}(\mathbf{A}[0])$
+  \STATE $\mathbf{s}^{\text{deg}} \leftarrow \sigma(\alpha \cdot \log(\mathbf{d} + \epsilon))$
+  \STATE \COMMENT{PageRank评分计算（多关系平均）}
+  \FOR{$r = 1 \textbf{ to } R$}
+    \STATE $\mathbf{e}_r \leftarrow \mathbf{E}_{:, r}$
+    \STATE $\mathbf{PR}_r \leftarrow \text{PageRankScore}(\mathbf{A}, \mathbf{e}_r, N)$
+  \ENDFOR
+  \STATE $\mathbf{PR} \leftarrow \frac{1}{R} \sum_{r=1}^{R} \mathbf{PR}_r$
+  \STATE $\mathbf{s}^{\text{pr}} \leftarrow \sigma(\beta \cdot \mathbf{PR})$
+  \STATE $\mathbf{s} \leftarrow \frac{1}{2}(\mathbf{s}^{\text{deg}} + \mathbf{s}^{\text{pr}})$
+
+  \STATE \COMMENT{步骤2：Top-K节点选择}
+  \STATE $k \leftarrow \lceil p \cdot N \rceil$
+  \STATE $\text{perm} \leftarrow \text{topk}(\mathbf{s}, k)$
+  \STATE $\mathbf{x}' \leftarrow \mathbf{x}[\text{perm}] \odot \mathbf{s}[\text{perm}]$
+  \STATE $(\mathbf{A}', \mathbf{E}') \leftarrow \text{filter\_adj}(\mathbf{A}, \mathbf{E}, \text{perm})$
+
+  \STATE \COMMENT{步骤3：边结构学习}
+  \STATE $(\mathbf{A}'', \mathbf{E}'') \leftarrow \text{add\_self\_loops}(\mathbf{A}', \mathbf{E}')$
+  \STATE $\mathbf{A}'' \leftarrow \text{sort\_by\_source}(\mathbf{A}'')$
+  \STATE $(\mathbf{row}, \mathbf{col}) \leftarrow \mathbf{A}''$
+  \STATE $\mathbf{a}_{\text{feat}} \leftarrow [\mathbf{x}'[\mathbf{row}] ; \mathbf{x}'[\mathbf{col}]]$
+  \STATE $\mathbf{w}_{\text{att}} \leftarrow (\mathbf{a}_{\text{feat}} \cdot \mathbf{a})^{\top}$
+  \STATE $\tilde{\mathbf{w}}_{\text{att}} \leftarrow \text{LeakyReLU}(\mathbf{w}_{\text{att}}, \delta)$
+  \STATE \COMMENT{各关系通道独立Sparsemax归一化}
+  \FOR{$r = 1 \textbf{ to } R$}
+    \STATE $\mathbf{w}_r^{\text{fused}} \leftarrow \lambda \cdot \mathbf{E}''_{:, r} + \tilde{\mathbf{w}}_{\text{att}}$
+    \STATE $\mathbf{E}^{\text{sparse}}_{:, r} \leftarrow \text{Sparsemax}(\mathbf{w}_r^{\text{fused}}, \mathbf{row})$
+  \ENDFOR
+  \STATE $\mathbf{E}' \leftarrow \mathbf{E}^{\text{sparse}}$
+
+  \STATE \COMMENT{步骤4：过滤无效边}
+  \STATE $\mathbf{mask} \leftarrow \mathbf{E}'_{:, 0} \neq 0$
+  \STATE $\mathbf{A}' \leftarrow \mathbf{A}'[:, \mathbf{mask}]$
+  \STATE $\mathbf{E}' \leftarrow \mathbf{E}'[\mathbf{mask}, :]$
+  \RETURN $\mathbf{x}', \mathbf{A}', \mathbf{E}', \text{perm}$
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+  \centering
+  \caption{Sparsemax归一化算法}
+  \label{alg:sparsemax}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\mathbf{z} \in \mathbb{R}^n$：原始分数向量；$\mathbf{batch}$：节点批次标签
+  \ENSURE $\mathbf{p} \in \mathbb{R}^n$：稀疏概率分布
+
+  \STATE \COMMENT{按批次分组处理}
+  \FOR{$\text{batch\_id} \in \text{unique}(\mathbf{batch})$}
+    \STATE $\mathbf{z}_b \leftarrow \mathbf{z}[\mathbf{batch} = \text{batch\_id}]$
+    \STATE $n_b \leftarrow |\mathbf{z}_b|$
+    \STATE \COMMENT{排序并计算累积和}
+    \STATE $\mathbf{z}_{\text{sorted}} \leftarrow \text{sort}(\mathbf{z}_b)$
+    \STATE $\mathbf{cs} \leftarrow \text{cumsum}(\mathbf{z}_{\text{sorted}})$
+    \STATE \COMMENT{寻找Sparsemax阈值$\tau$}
+    \FOR{$j = 1 \textbf{ to } n_b$}
+      \STATE $\mathbf{cs}_j - j \cdot \mathbf{z}_{\text{sorted},j} \overset{?}{\leq} 1$
+    \ENDFOR
+    \STATE $\tau \leftarrow j^* / (j^* - 1) \cdot (\mathbf{cs}_{j^*} - 1) / j^*$
+    \STATE \COMMENT{计算稀疏概率}
+    \STATE $\mathbf{p}_b \leftarrow \max(\mathbf{z}_b - \tau, 0)$
+    \STATE $\mathbf{p}[\mathbf{batch} = \text{batch\_id}] \leftarrow \mathbf{p}_b$
+  \ENDFOR
+  \RETURN $\mathbf{p}$
+  \end{algorithmic}
+\end{algorithm}
+
+\newpage
+
+模型采用层级Readout策略，融合所有编码器层的节点特征：
+
+\begin{equation}
+\mathbf{h}_g^{(l)} = \left[ \frac{1}{N_l} \sum_{i=1}^{N_l} \mathbf{x}^{(l)}_i \quad ; \quad \max_{i} \mathbf{x}^{(l)}_i \right]
+\end{equation}
+
+\begin{equation}
+\mathbf{h}_g = \sum_{l=0}^{D} \mathbf{h}_g^{(l)}
+\end{equation}
+
+这种设计保留了多尺度图信息，避免了仅使用最深层特征的局限性。
+
+\subsection{预测头设计}
+
+预测头由三层全连接网络组成：
+
+\begin{equation}
+\mathbf{h}_1 = \text{ReLU}\left( \mathbf{W}_1 \mathbf{h}_g + \mathbf{b}_1 \right)
+\end{equation}
+
+\begin{equation}
+\mathbf{h}_2 = \text{ReLU}\left( \mathbf{W}_2 \mathbf{h}_1 + \mathbf{b}_2 \right)
+\end{equation}
+
+\begin{equation}
+\hat{y} = \mathbf{W}_3 \mathbf{h}_2 + \mathbf{b}_3
+\end{equation}
+
+Dropout正则化应用于各层：
+\begin{equation}
+\mathbf{h}'_l = \text{Dropout}(\mathbf{h}_l, p)
+\end{equation}
+其中 $p$ 为Dropout比率（默认0.5）。
+
+\subsection{LGUNet\_rela 各层详细配置参数}
+
+本节详细列出LGUNet\_rela模型各层的具体配置参数，以默认配置为例（hidden\_dimension=246, depth=3, pool\_ratio=[0.5, 0.8, 0.5], dropout=0.5）。
+
+\subsubsection{输入层配置}
+
+\begin{itemize}
+    \item \textbf{relationGCN Input Layer}
+    \begin{itemize}
+        \item 输入维度 (in\_dim): 246
+        \item 输出维度 (out\_dim): 246
+        \item 关系数量 (relation\_num): 3
+        \item 权重矩阵形状: (3, 246, 246)，参数量 = 3 $\times$ 246 $\times$ 246 = 181,548
+        \item 偏置 (bias): 246维
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{编码器层配置（Depth=3）}
+
+\textbf{编码器第1层 (Layer 1):}
+
+\begin{itemize}
+    \item \textbf{LGMVPool\textsubscript{1}}
+    \begin{itemize}
+        \item 输入特征维度: 246
+        \item 池化比例 (pool\_ratio): 0.5
+        \item 负斜率 (negative\_slope): 0.2
+        \item 可学习参数:
+        \begin{itemize}
+            \item $\alpha$: 标量参数（初始化为1.0）
+            \item $\beta$: 标量参数（初始化为1.0）
+            \item $\theta$: 标量参数（初始化为1.0）
+            \item att: (1, 492) 维张量
+        \end{itemize}
+    \end{itemize}
+    \item \textbf{relationGCN\textsubscript{1}}
+    \begin{itemize}
+        \item 输入维度 (in\_dim): 246
+        \item 输出维度 (out\_dim): 246
+        \item 关系数量 (relation\_num): 3
+        \item 权重矩阵形状: (3, 246, 246)
+    \end{itemize}
+\end{itemize}
+
+\textbf{编码器第2层 (Layer 2):}
+
+\begin{itemize}
+    \item \textbf{LGMVPool\textsubscript{2}}
+    \begin{itemize}
+        \item 输入特征维度: 246
+        \item 池化比例 (pool\_ratio): 0.8
+        \item 负斜率 (negative\_slope): 0.2
+        \item 可学习参数与Layer 1相同
+    \end{itemize}
+    \item \textbf{relationGCN\textsubscript{2}}
+    \begin{itemize}
+        \item 输入维度 (in\_dim): 246
+        \item 输出维度 (out\_dim): 246
+        \item 关系数量 (relation\_num): 3
+    \end{itemize}
+\end{itemize}
+
+\textbf{编码器第3层 (Layer 3):}
+
+\begin{itemize}
+    \item \textbf{LGMVPool\textsubscript{3}}
+    \begin{itemize}
+        \item 输入特征维度: 246
+        \item 池化比例 (pool\_ratio): 0.5
+        \item 负斜率 (negative\_slope): 0.2
+        \item 可学习参数与Layer 1相同
+    \end{itemize}
+    \item \textbf{relationGCN\textsubscript{3}}
+    \begin{itemize}
+        \item 输入维度 (in\_dim): 246
+        \item 输出维度 (out\_dim): 246
+        \item 关系数量 (relation\_num): 3
+    \end{itemize}
+\end{itemize}
+
+\subsubsection{Readout层配置}
+
+\begin{itemize}
+    \item 对所有4个中间输出 (xs[0], xs[1], xs[2], xs[3]) 分别计算:
+    \begin{itemize}
+        \item Global Mean Pooling: 输出246维
+        \item Global Max Pooling: 输出246维
+        \item 拼接后: 492维
+    \end{itemize}
+    \item 4层输出求和: $492 \times 4 = 1968$ 维
+\end{itemize}
+
+\subsubsection{预测头配置}
+
+\textbf{第一层全连接 (lin1):}
+\begin{itemize}
+    \item 输入维度: 246 $\times$ 2 = 492（注：实际为1968，但通过reshape变为in\_channels $\times$ hidden\_channels $\times$ 2）
+    \item 输出维度: 246
+    \item 权重矩阵形状: (492, 246)
+    \item 激活函数: ReLU
+    \item Dropout: 0.5
+\end{itemize}
+
+\textbf{第二层全连接 (lin2):}
+\begin{itemize}
+    \item 输入维度: 246
+    \item 输出维度: 123 (hidden\_dimension // 2)
+    \item 权重矩阵形状: (246, 123)
+    \item 激活函数: ReLU
+    \item Dropout: 0.5
+\end{itemize}
+
+\textbf{第三层全连接 (lin3):}
+\begin{itemize}
+    \item 输入维度: 123
+    \item 输出维度: 1
+    \item 权重矩阵形状: (123, 1)
+    \item 无激活函数（线性输出）
+\end{itemize}
+
+\subsubsection{模型参数总量估算}
+
+以BNA246脑区图谱（246个节点）为例，典型配置下的参数量估算：
+
+\begin{table}[htbp]
+\centering
+\caption{LGUNet\_rela 各层参数量统计}
+\label{tab:layer_params}
+\begin{tabular}{llcc}
+\toprule
+层级 & 参数类型 & 参数形状 & 参数量 \\
+\midrule
+Input Layer & relationGCN权重 & (3, 246, 246) & 181,548 \\
+            & relationGCN偏置 & (246,) & 246 \\
+\midrule
+Layer 1 & LGMVPool可学习参数 & 标量$\times$3 + (1,492) & $\sim$500 \\
+        & relationGCN权重 & (3, 246, 246) & 181,548 \\
+        & relationGCN偏置 & (246,) & 246 \\
+\midrule
+Layer 2 & LGMVPool可学习参数 & 标量$\times$3 + (1,492) & $\sim$500 \\
+        & relationGCN权重 & (3, 246, 246) & 181,548 \\
+        & relationGCN偏置 & (246,) & 246 \\
+\midrule
+Layer 3 & LGMVPool可学习参数 & 标量$\times$3 + (1,492) & $\sim$500 \\
+        & relationGCN权重 & (3, 246, 246) & 181,548 \\
+        & relationGCN偏置 & (246,) & 246 \\
+\midrule
+\midrule
+Lin1 & 权重矩阵 & (492, 246) & 121,032 \\
+     & 偏置 & (246,) & 246 \\
+\midrule
+Lin2 & 权重矩阵 & (246, 123) & 30,258 \\
+     & 偏置 & (123,) & 123 \\
+\midrule
+Lin3 & 权重矩阵 & (123, 1) & 123 \\
+     & 偏置 & (1,) & 1 \\
+\midrule
+\midrule
+\textbf{总计} & \textbf{-} & \textbf{-} & \textbf{$\sim$880,000} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{各模块可配置参数汇总}
+
+\begin{itemize}
+    \item \textbf{LGMVPool 模块}
+    \begin{itemize}
+        \item alpha ($\alpha$): 节点度评分权重，初始化为1.0
+        \item beta ($\beta$): PageRank评分权重，初始化为1.0
+        \item theta ($\theta$): 结构学习权重，初始化为1.0
+        \item att ($\mathbf{a}$): 注意力参数，形状 (1, 2$\times$hidden\_dim)
+        \item lamb ($\lambda$): 边权重融合系数，默认0.3
+        \item negative\_slope ($\delta$): LeakyReLU负斜率，默认0.2
+    \end{itemize}
+    
+    \item \textbf{relationGCN 模块}
+    \begin{itemize}
+        \item 权重矩阵 $\mathbf{W}_r$: 形状 (relation\_num, in\_dim, out\_dim)
+        \item 偏置 $\mathbf{b}$: 形状 (out\_dim,)
+    \end{itemize}
+    
+    \item \textbf{PageRankScore 模块}
+    \begin{itemize}
+        \item channels: 节点数（自动从输入推断）
+        \item k: 迭代次数，默认10
+        \item alpha: 阻尼系数，默认0.1
+    \end{itemize}
+    
+    \item \textbf{预测头模块}
+    \begin{itemize}
+        \item Lin1: 权重 (492, 246)，偏置 (246,)
+        \item Lin2: 权重 (246, 123)，偏置 (123,)
+        \item Lin3: 权重 (123, 1)，偏置 (1,)
+    \end{itemize}
+\end{itemize}
+
+\newpage
+
+\section{训练任务设计}
+
+\subsection{回归任务定义}
+
+模型的主要任务是预测大脑认知功能评分。给定一批图数据 $\{\mathcal{G}_i, y_i\}_{i=1}^{B}$，其中 $y_i \in \mathbb{R}$ 为目标认知评分，训练目标是学习一个映射函数 $f: \mathcal{G} \rightarrow \mathbb{R}$。
+
+认知评分类型包括（取决于数据集配置）：
+\begin{itemize}
+    \item 流体认知评分 (CogFluidComp\_Unadj)
+    \item 晶体认知评分 (CogCrystalComp\_Unadj)
+    \item 总认知评分 (CogTotalComp\_Unadj)
+    \item 早期认知评分 (CogEarlyComp\_Unadj)
+    \item 记忆评分 (PicSeq\_Acc)
+    \item 执行功能评分 (CardSort\_Acc)
+    \item 处理速度评分 (ProcSpeed\_Acc)
+\end{itemize}
+
+\subsection{数据增强策略}
+
+\begin{enumerate}
+    \item \textbf{节点特征归一化}：对输入节点特征进行标准化处理
+    \item \textbf{边权重归一化}：采用对称归一化：$\tilde{e}_{ij} = \frac{e_{ij}}{\sqrt{d_i \cdot d_j}}$
+    \item \textbf{随机Dropout}：训练时随机丢弃部分节点特征
+\end{enumerate}
+
+\subsection{优化器配置}
+
+模型使用Adam优化器：
+
+\begin{equation}
+\mathbf{W}_{t+1} = \mathbf{W}_t - \frac{\eta}{\sqrt{\hat{v}_t} + \epsilon} \hat{m}_t
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\eta$：学习率（默认0.01）
+    \item $\beta_1 = 0.9$：一阶矩估计指数衰减率
+    \item $\beta_2 = 0.999$：二阶矩估计指数衰减率
+    \item $\epsilon = 10^{-8}$：数值稳定项
+\end{itemize}
+
+参数更新通过偏差校正：
+\begin{equation}
+\hat{m}_t = \frac{m_t}{1 - \beta_1^t}, \quad \hat{v}_t = \frac{v_t}{1 - \beta_2^t}
+\end{equation}
+
+L2正则化通过weight\_decay参数实现（默认0.001）。
+
+\subsection{学习率调度}
+
+模型支持两种学习率调度策略：传统的固定里程碑衰减策略，以及本文提出的动态自适应调整策略。
+
+\subsubsection{策略一：多里程碑衰减策略（MultiStepLR）}
+
+采用MultiStep学习率衰减策略：
+
+\begin{equation}
+\eta_t = \eta_0 \cdot \gamma^{\sum_{j} \mathbb{I}(t \geq T_j)}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\eta_0$：初始学习率
+    \item $\gamma = 0.5$：衰减系数
+    \item $T_j \in \{30, 60, 80\}$：衰减里程碑
+    \item $\mathbb{I}(\cdot)$：指示函数
+\end{itemize}
+
+即学习率在第30、60、80个epoch时各衰减50\%。
+
+\subsubsection{策略二：动态自适应学习率调度（DynamicLR）}
+
+针对深度神经网络训练中常见的收敛困难和局部最优问题，本文提出一种融合损失 Plateau 检测与梯度范数监控的动态学习率调整策略。该策略能够根据训练过程中的实时信号自适应调整学习率，在训练初期实现平滑起步（Warmup），在训练中后期自动应对收敛停滞。
+
+\subsubsubsection{问题定义与动机}
+
+传统的固定学习率衰减策略存在以下局限性：
+
+\begin{itemize}
+    \item \textbf{预设定依赖性强}：需要人工预设衰减里程碑，难以适应不同任务和数据集
+    \item \textbf{忽视训练动态}：无法根据模型实际收敛状态调整策略
+    \item \textbf{梯度信息未利用}：梯度范数蕴含了丰富的优化过程信息，传统方法未加以利用
+\end{itemize}
+
+深度神经网络训练中的梯度范数演化规律表明：
+
+\begin{itemize}
+    \item \textbf{梯度过小}（$\|\mathbf{g}\| < \tau_{\text{low}}$）：模型可能陷入平坦区域（Plateau），需要适当增大学习率以加速逃离
+    \item \textbf{梯度过大}（$\|\mathbf{g}\| > \tau_{\text{high}}$）：训练可能进入震荡状态，需要减小学习率以稳定收敛
+    \item \textbf{损失停滞}：连续多轮验证损失未改善，表明需要更激进的衰减
+\end{itemize}
+
+\subsubsubsection{数学框架}
+
+动态学习率调度器的核心参数更新规则定义如下：
+
+\textbf{（1）预热阶段（Warmup）}
+
+在训练初期（前 $T_{\text{warm}}$ 个epoch），采用线性预热策略使学习率平滑增长：
+
+\begin{equation}
+\eta_t = \eta_0 \cdot \frac{t + 1}{T_{\text{warm}}}, \quad t < T_{\text{warm}}
+\end{equation}
+
+这一设计有助于：
+\begin{itemize}
+    \item 避免初始阶段过大的参数更新导致训练不稳定
+    \item 让模型在较低学习率下充分探索参数空间
+    \item 使优化器自适应估计各参数的海森矩阵特性
+\end{itemize}
+
+\textbf{（2）损失 Plateau 检测}
+
+定义 Plateau 状态：若当前训练损失 $\mathcal{L}_t$ 在连续 $P$ 个epoch内未低于历史最佳损失 $\mathcal{L}_{\text{best}}$，则触发衰减：
+
+\begin{equation}
+\text{Plateau} \iff \exists t_0: \forall \tau \in [t_0, t_0 + P]: \mathcal{L}_\tau \geq \mathcal{L}_{\text{best}} - \epsilon
+\end{equation}
+
+其中 $\epsilon = 10^{-6}$ 为改善阈值。
+
+触发 Plateau 衰减时，学习率更新为：
+
+\begin{equation}
+\eta_{t+1} = \max\left(\eta_t \cdot \gamma_{\text{decay}}, \eta_{\text{min}}\right)
+\end{equation}
+
+\textbf{（3）梯度范数自适应调整}
+
+为有效利用梯度信息，调度器维护一个滑动窗口（窗口大小 $W$）记录近期梯度范数：
+
+\begin{equation}
+\bar{g}_t = \frac{1}{W} \sum_{i=t-W+1}^{t} \|\mathbf{g}_i\|
+\end{equation}
+
+基于 $\bar{g}_t$ 与预设阈值的比较，动态调整学习率：
+
+\begin{equation}
+\eta_{t+1} = \eta_t \cdot \alpha(\bar{g}_t)
+\end{equation}
+
+其中调整因子 $\alpha(\cdot)$ 定义为：
+
+\begin{equation}
+\alpha(\bar{g}) = \begin{cases}
+\gamma_{\text{inc}} & \text{if } \bar{g} < \tau_{\text{low}} \text{ 且增加计数} < N_{\text{inc}} \\
+\gamma_{\text{dec}} & \text{if } \bar{g} > \tau_{\text{high}} \\
+1.0 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\gamma_{\text{inc}} = 1.05$：梯度过小时的学习率放大因子
+    \item $\gamma_{\text{dec}} = 0.7$：梯度过大时的学习率缩减因子
+    \item $N_{\text{inc}} = 3$：防止学习率无限增大的上限计数
+\end{itemize}
+
+\subsubsubsection{综合调度算法}
+
+完整的动态学习率调度算法如下：
+
+\begin{algorithm}
+  \centering
+  \caption{动态学习率自适应调度算法}
+  \label{alg:dynamic_lr}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\eta_0$：初始学习率；$T_{\text{warm}}$：预热epoch数；$P$：Patience值；$\gamma_{\text{decay}}$：衰减因子；$\eta_{\text{min}}$：最小学习率
+  \ENSURE $\eta_t$：第$t$个epoch的学习率
+
+  \STATE \COMMENT{初始化}
+  \STATE $\ctx.best\_loss \leftarrow +\infty$
+  \STATE $\ctx.wait\_count \leftarrow 0$
+  \STATE $\ctx.grad\_history \leftarrow []$
+  \STATE $\ctx.increase\_count \leftarrow 0$
+  \STATE $\ctx.current\_lr \leftarrow \eta_0$
+
+  \STATE \COMMENT{主循环：每个epoch执行一次}
+  \FOR{$t = 0 \textbf{ to } T-1$}
+    \STATE \COMMENT{计算当前batch的平均梯度范数}
+    \STATE $\bar{g}_t \leftarrow \frac{1}{B} \sum_{b=1}^{B} \|\mathbf{g}_b\|$
+    \STATE $\ctx.grad\_history.\text{append}(\bar{g}_t)$
+    \STATE \COMMENT{更新滑动窗口}
+    \IF{$|\ctx.grad\_history| > W$}
+      \STATE $\ctx.grad\_history.\text{pop}(0)$
+    \ENDIF
+    \STATE \COMMENT{预热阶段：线性增长}
+    \IF{$t < T_{\text{warm}}$}
+      \STATE $\ctx.current\_lr \leftarrow \eta_0 \cdot (t + 1) / T_{\text{warm}}$
+      \RETURN $\ctx.current\_lr$
+    \ENDIF
+    \STATE \COMMENT{Plateau检测}
+    \IF{$\mathcal{L}_t < \ctx.best\_loss - \epsilon$}
+      \STATE $\ctx.best\_loss \leftarrow \mathcal{L}_t$
+      \STATE $\ctx.wait\_count \leftarrow 0$
+    \ELSE
+      \STATE $\ctx.wait\_count \leftarrow \ctx.wait\_count + 1$
+    \ENDIF
+    \STATE \COMMENT{梯度范数自适应调整}
+    \IF{$|\ctx.grad\_history| \geq W$}
+      \STATE $\bar{g} \leftarrow \text{mean}(\ctx.grad\_history)$
+      \IF{$\bar{g} < \tau_{\text{low}} \textbf{ and } \ctx.increase\_count < N_{\text{inc}}$}
+        \STATE $\ctx.current\_lr \leftarrow \ctx.current\_lr \times \gamma_{\text{inc}}$
+        \STATE $\ctx.increase\_count \leftarrow \ctx.increase\_count + 1$
+      \ELSIF{$\bar{g} > \tau_{\text{high}}$}
+        \STATE $\ctx.current\_lr \leftarrow \ctx.current\_lr \times \gamma_{\text{dec}}$
+        \STATE $\ctx.increase\_count \leftarrow 0$
+      \ELSE
+        \STATE $\ctx.increase\_count \leftarrow 0$
+      \ENDIF
+    \ENDIF
+    \STATE \COMMENT{Plateau触发衰减}
+    \IF{$\ctx.wait\_count \geq P$}
+      \STATE $\ctx.current\_lr \leftarrow \max(\ctx.current\_lr \times \gamma_{\text{decay}}, \eta_{\text{min}})$
+      \STATE $\ctx.wait\_count \leftarrow 0$
+      \STATE $\ctx.increase\_count \leftarrow 0$
+    \ENDIF
+    \STATE \COMMENT{学习率边界约束}
+    \STATE $\ctx.current\_lr \leftarrow \min(\ctx.current\_lr, \eta_0)$
+    \RETURN $\ctx.current\_lr$
+  \ENDFOR
+  \end{algorithmic}
+\end{algorithm}
+
+\subsubsubsection{默认参数配置}
+
+动态学习率调度器的默认超参数设置如下：
+
+\begin{itemize}
+    \item \textbf{初始学习率} $\eta_0$：默认0.01，与优化器初始学习率一致
+    \item \textbf{最小学习率} $\eta_{\text{min}}$：默认$1 \times 10^{-6}$，防止过小导致训练停滞
+    \item \textbf{预热轮数} $T_{\text{warm}}$：默认5，防止初始震荡
+    \item \textbf{Patience} $P$：默认10，平衡收敛检测灵敏度与容错性
+    \item \textbf{衰减因子} $\gamma_{\text{decay}}$：默认0.5，与MultiStepLR一致
+    \item \textbf{梯度下阈值} $\tau_{\text{low}}$：默认0.01
+    \item \textbf{梯度上阈值} $\tau_{\text{high}}$：默认10.0
+    \item \textbf{学习率增量因子} $\gamma_{\text{inc}}$：默认1.05
+    \item \textbf{最大增量次数} $N_{\text{inc}}$：默认3，防止过度增加
+    \item \textbf{滑动窗口大小} $W$：默认5，平滑梯度波动
+\end{itemize}
+
+\subsubsubsection{训练日志增强}
+
+启用动态学习率调度后，训练日志将额外输出以下信息：
+
+\begin{verbatim}
+Epoch: 0001 loss_train: 1.2345 loss_val: 1.4567 lr: 0.002000 grad_norm: 0.5678 time: 12.3456s
+\end{verbatim}
+
+其中：
+\begin{itemize}
+    \item \texttt{lr}：当前epoch的学习率
+    \item \texttt{grad\_norm}：当前epoch的平均梯度范数（$L_2$范数）
+\end{itemize}
+
+此外，\texttt{loss.csv} 文件新增两列：\texttt{learning\_rate} 和 \texttt{grad\_norm}，便于后续可视化分析学习率演化与梯度动态。
+
+\subsubsubsection{方法学优势总结}
+
+本文提出的动态学习率调度策略具有以下优势：
+
+\begin{enumerate}
+    \item \textbf{自适应性强}：无需人工预设衰减里程碑，算法自动根据训练动态调整
+    \item \textbf{梯度信息利用充分}：通过梯度范数监控，有效识别训练中的异常状态（震荡/停滞）
+    \item \textbf{收敛稳定性增强}：Warmup阶段避免初始参数大幅震荡，Plateau检测防止无效训练
+    \item \textbf{训练效率提升}：梯度过小时自动增大学习率，加速逃离平坦区域
+    \item \textbf{与现有方法兼容}：可作为标准MultiStepLR的替代方案，无需修改模型架构
+\end{enumerate}
+
+该策略特别适用于以下场景：
+\begin{itemize}
+    \item 大规模图神经网络训练，参数空间复杂
+    \item 多标签认知预测任务，不同标签收敛速度差异大
+    \item 探索性实验阶段，超参数寻优困难
+\end{itemize}
+
+\subsubsubsection{使用说明}
+
+动态学习率调度功能通过命令行参数控制：
+
+\begin{verbatim}
+--use_dynamic_lr              # 启用动态学习率调度
+--lr_patience 10             # Plateau检测的Patience值
+--lr_factor 0.5              # 衰减因子
+--min_lr 1e-6                # 最小学习率
+--warmup_epochs 5            # 预热epoch数
+\end{verbatim}
+
+若不指定 \texttt{--use\_dynamic\_lr}，则使用传统的MultiStepLR策略。
+
+\subsection{早停机制（Early Stopping）}
+
+\subsubsection{问题定义与训练效率优化}
+
+在深度神经网络训练过程中，过拟合是一个普遍存在的问题。当模型在训练集上持续优化时，验证集性能往往会在达到最优后开始下降。如果继续训练，模型会逐渐记忆训练数据的噪声，导致泛化能力下降。早停机制（Early Stopping）是一种经典的正则化技术，通过监控验证集性能，在模型开始过拟合之前主动终止训练，从而在模型性能达到峰值时保存最佳模型参数。
+
+传统的训练策略存在以下问题：
+
+\begin{itemize}
+    \item \textbf{训练资源浪费}：设置固定的训练轮数会导致模型在达到最优后继续进行无意义的参数更新
+    \item \textbf{过拟合风险}：过长的训练时间使模型有更多机会过度拟合训练数据
+    \item \textbf{最优checkpoint难以确定}：需要人工干预或使用额外脚本查找最佳模型
+\end{itemize}
+
+早停机制通过自动化监控和决策，有效解决了上述问题。
+
+\subsubsection{数学框架}
+
+早停机制的核心是在每个epoch结束后检查验证集性能是否持续改善。设 $\mathcal{L}_{\text{val}}^{(t)}$ 为第 $t$ 个epoch的验证损失，定义改善判定条件：
+
+\begin{equation}
+\text{improved} \iff \mathcal{L}_{\text{val}}^{(t)} < \mathcal{L}_{\text{val}}^{\text{best}} - \delta
+\end{equation}
+
+其中 $\delta > 0$ 为最小改善阈值（默认为 $10^{-4}$），用于避免因数值噪声导致的误判。
+
+当验证损失未改善时，计数器加一：
+
+\begin{equation}
+\text{wait\_count}^{(t)} = \begin{cases}
+0 & \text{if } \mathcal{L}_{\text{val}}^{(t)} < \mathcal{L}_{\text{val}}^{\text{best}} - \delta \\
+\text{wait\_count}^{(t-1)} + 1 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+当 $\text{wait\_count} \geq P$（Patience值）时，触发早停：
+
+\begin{equation}
+\text{early\_stop\_triggered} \iff \text{wait\_count} \geq P
+\end{equation}
+
+触发早停后，模型恢复到训练过程中验证损失最低时的参数状态：
+
+\begin{equation}
+\Theta^{\text{final}} = \Theta^{\text{best}}, \quad \text{where } \mathcal{L}_{\text{val}}^{\text{best}} = \min_t \mathcal{L}_{\text{val}}^{(t)}
+\end{equation}
+
+\subsubsection{最佳模型权重管理}
+
+为高效实现早停机制，系统采用临时文件与原子替换策略：
+
+\begin{enumerate}
+    \item \textbf{临时文件保存}：每轮训练后，若验证损失改善，将模型保存至临时文件 $M_{\text{tmp}}$
+    \item \textbf{计数器管理}：维护当前连续未改善轮数 $\text{wait\_count}$
+    \item \textbf{原子替换}：训练结束时，将 $M_{\text{tmp}}$ 原子替换为 $M_{\text{best}}$
+\end{enumerate}
+
+这种设计确保了：
+\begin{itemize}
+    \item 训练过程中始终保存最新的最佳模型
+    \item 避免频繁的磁盘I/O操作（仅在改善时保存）
+    \item 原子替换保证了文件的一致性
+\end{itemize}
+
+为支持早停触发后的权重恢复，系统在内存中维护最佳模型的完整状态字典：
+
+\begin{equation}
+\mathcal{S}^{\text{best}} = \left\{ (key, value) \mid \mathcal{L}_{\text{val}}^{(t)} = \mathcal{L}_{\text{val}}^{\text{best}} \right\}
+\end{equation}
+
+当早停触发时，直接加载 $\mathcal{S}^{\text{best}}$ 至模型，无需磁盘操作。
+
+\subsubsection{最小训练轮数约束}
+
+为防止过早终止训练，系统设置最小训练轮数 $T_{\text{min}}$（默认为10）：
+
+\begin{equation}
+\text{allow\_early\_stop} \iff \text{epoch} \geq T_{\text{min}} \text{ and } \text{wait\_count} \geq P
+\end{equation}
+
+这一设计确保：
+\begin{itemize}
+    \item 模型有足够时间学习数据的基本模式
+    \item 避免因训练初期的损失波动导致的误判
+    \item 保证训练过程的稳定性
+\end{itemize}
+
+\subsubsection{早停机制与动态学习率的协同}
+
+早停机制与动态学习率调度器可以联合使用，形成互补的优化策略：
+
+\begin{itemize}
+    \item \textbf{动态学习率}：根据训练动态调整学习率，帮助模型更好地探索损失曲面
+    \item \textbf{早停机制}：在模型性能达到峰值时主动停止，避免过拟合
+\end{itemize}
+
+二者的协同工作流程：
+
+\begin{verbatim}
+for epoch in range(num_epochs):
+    train_one_epoch(model, trainloader)
+    val_loss = evaluate(model, valloader)
+    
+    # 动态学习率更新
+    lr = dynamic_scheduler.step(epoch, train_loss, grad_norm)
+    
+    # 早停检查
+    should_stop = early_stopping(epoch, val_loss, model.state_dict())
+    if should_stop:
+        early_stopping.restore_weights(model)
+        break
+\end{verbatim}
+
+这种协同策略能够在保持优化效率的同时，有效控制过拟合风险。
+
+\begin{algorithm}
+  \centering
+  \caption{早停机制算法}
+  \label{alg:early_stopping}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\mathcal{L}_{\text{val}}^{(t)}$：第$t$个epoch的验证损失；$P$：Patience值；$\delta$：最小改善阈值；$T_{\text{min}}$：最小训练轮数
+  \ENSURE $\Theta^{\text{best}}$：最佳模型参数
+
+  \STATE \COMMENT{初始化}
+  \STATE $\ctx.best\_loss \leftarrow +\infty$
+  \STATE $\ctx.wait\_count \leftarrow 0$
+  \STATE $\ctx.best\_state \leftarrow \texttt{None}$
+  \STATE $\ctx.should\_stop \leftarrow \texttt{False}$
+
+  \STATE \COMMENT{主循环：每个epoch执行一次}
+  \FOR{$t = 0 \textbf{ to } T-1$}
+    \STATE \COMMENT{获取验证损失}
+    \STATE $\mathcal{L}_{\text{val}} \leftarrow \mathcal{L}_{\text{val}}^{(t)}$
+    \STATE $\ctx.model\_state \leftarrow \text{model.state\_dict()}$
+    \STATE \COMMENT{检查是否改善}
+    \IF{$\mathcal{L}_{\text{val}} < \ctx.best\_loss - \delta$}
+      \STATE $\ctx.best\_loss \leftarrow \mathcal{L}_{\text{val}}$
+      \STATE $\ctx.wait\_count \leftarrow 0$
+      \STATE $\ctx.best\_state \leftarrow \ctx.model\_state$
+    \ELSE
+      \STATE $\ctx.wait\_count \leftarrow \ctx.wait\_count + 1$
+    \ENDIF
+    \STATE \COMMENT{早停判定（需满足最小训练轮数）}
+    \IF{$t \geq T_{\text{min}} \textbf{ and } \ctx.wait\_count \geq P$}
+      \STATE $\ctx.should\_stop \leftarrow \texttt{True}$
+      \STATE \COMMENT{恢复到最佳权重}
+      \STATE $\text{model.load\_state\_dict}(\ctx.best\_state)$
+      \RETURN $\ctx.best\_state$
+    \ENDIF
+  \ENDFOR
+  \RETURN $\ctx.best\_state$
+  \end{algorithmic}
+\end{algorithm}
+
+\subsubsection{默认参数配置}
+
+早停机制的默认超参数设置如下：
+
+\begin{itemize}
+    \item \textbf{Patience值} $P$：默认15，平衡过早停止与过拟合风险
+    \item \textbf{最小改善阈值} $\delta$：默认$1 \times 10^{-4}$，避免数值噪声误判
+    \item \textbf{最小训练轮数} $T_{\text{min}}$：默认10，确保模型有足够学习时间
+    \item \textbf{恢复最佳权重}：默认启用，防止非最优模型被使用
+    \item \textbf{模式}：\texttt{min}，监控验证损失（越小越好）
+\end{itemize}
+
+\subsubsection{方法学优势总结}
+
+本文实现的早停机制具有以下优势：
+
+\begin{enumerate}
+    \item \textbf{自动化模型选择}：无需人工干预，算法自动确定最优训练时长
+    \item \textbf{过拟合防护}：有效防止模型在验证损失开始上升后继续训练
+    \item \textbf{资源高效利用}：避免不必要的训练轮次，节省计算资源
+    \item \textbf{与早停策略兼容}：可与动态学习率调度器联合使用
+    \item \textbf{可配置性强}：提供多个可调参数，适应不同任务需求
+\end{enumerate}
+
+该机制特别适用于以下场景：
+
+\begin{itemize}
+    \item 大规模训练任务，计算资源有限
+    \item 训练轮数上限不明确的任务
+    \item 需要同时训练多个标签的场景
+    \item 与动态学习率联合使用
+\end{itemize}
+
+\subsubsection{使用说明}
+
+早停功能通过命令行参数控制：
+
+\begin{verbatim}
+--use_early_stopping              # 启用早停机制
+--early_stopping_patience 15     # Patience值
+--early_stopping_min_delta 1e-4  # 最小改善阈值
+--early_stopping_min_epochs 10   # 最小训练轮数
+--early_stopping_restore_best    # 恢复最佳权重（默认启用）
+--early_stopping_no_restore_best  # 不恢复最佳权重
+\end{verbatim}
+
+若不指定 \texttt{--use\_early\_stopping}，则训练将进行完整的指定轮数。
+
+与动态学习率联合使用示例：
+
+\begin{verbatim}
+python run.py --use_dynamic_lr --use_early_stopping \
+    --lr_patience 10 --early_stopping_patience 20 \
+    --warmup_epochs 5 --early_stopping_min_epochs 15
+\end{verbatim}
+
+\subsection{批次处理}
+
+批次大小（batch size）默认设置为16，采用图批次（batch）机制处理多个图样本。
+
+节点批量索引生成：
+\begin{equation}
+\text{batch}_i = j, \quad \text{for } i \in \mathcal{V}_j
+\end{equation}
+其中 $\mathcal{V}_j$ 为第 $j$ 个图的节点集合。
+
+这种设计允许在单次前向传播中处理多个图样本，提高计算效率。
+
+\newpage
+
+\section{损失函数}
+
+\subsection{Smooth L1 Loss (Huber Loss)}
+
+模型采用Smooth L1 Loss作为训练损失函数，这是回归任务中常用的损失函数，结合了L1 Loss和L2 Loss的优点：
+
+\begin{equation}
+\mathcal{L}_{\text{SmoothL1}}(y, \hat{y}) = \begin{cases}
+\frac{1}{2} (y - \hat{y})^2 & \text{if } |y - \hat{y}| < 1 \\
+|y - \hat{y}| - \frac{1}{2} & \text{otherwise}
+\end{cases}
+\end{equation}
+
+等价的紧凑形式：
+\begin{equation}
+\mathcal{L}_{\text{SmoothL1}}(y, \hat{y}) = \sum_{i=1}^{B} \text{smooth}_{L_1}(y_i - \hat{y}_i)
+\end{equation}
+
+其中：
+\begin{equation}
+\text{smooth}_{L_1}(x) = \begin{cases}
+0.5 x^2 & \text{if } |x| < 1 \\
+|x| - 0.5 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+\textbf{Smooth L1 Loss的优势：}
+\begin{itemize}
+    \item 当误差较小时（$|x| < 1$），采用L2 Loss，梯度较大，收敛速度快
+    \item 当误差较大时（$|x| \geq 1$），采用L1 Loss，对异常值更鲁棒
+    \item 相比纯L2 Loss，对离群点的敏感性降低
+    \item 相比纯L1 Loss，在零点处连续可导
+\end{itemize}
+
+批次损失计算：
+\begin{equation}
+\mathcal{L} = \frac{1}{B} \sum_{i=1}^{B} \mathcal{L}_{\text{SmoothL1}}(y_i, \hat{y}_i)
+\end{equation}
+
+训练过程中监控训练损失和验证损失：
+\begin{equation}
+\mathcal{L}_{\text{train}} = \frac{1}{|\mathcal{B}_{\text{train}}|} \sum_{\mathcal{G}, y \in \mathcal{B}_{\text{train}}} \mathcal{L}_{\text{SmoothL1}}(y, f(\mathcal{G}))
+\end{equation}
+
+\begin{equation}
+\mathcal{L}_{\text{val}} = \frac{1}{|\mathcal{B}_{\text{val}}|} \sum_{\mathcal{G}, y \in \mathcal{B}_{\text{val}}} \mathcal{L}_{\text{SmoothL1}}(y, f(\mathcal{G}))
+\end{equation}
+
+基于验证损失保存最优模型。
+
+\subsection{标签 Z-Score 标准化策略}
+
+\subsubsection{问题定义与动机}
+
+在脑认知功能的回归预测任务中，不同认知评分的量纲和数值分布存在显著差异。以典型数据集为例，流体认知评分（CogFluidComp\_Unadj）的取值范围可能为 $[40, 180]$，而记忆评分（PicSeq\_Acc）的取值范围仅为 $[0, 100]$。这种量纲异质性会严重影响模型的训练稳定性和预测精度：
+
+\begin{itemize}
+    \item \textbf{梯度量级不一致}：损失函数的梯度主要由数值较大的标签主导，导致模型过度关注高数值范围的标签
+    \item \textbf{损失函数收敛困难}：不同标签的损失贡献差异悬殊，难以找到全局最优
+    \item \textbf{评估指标可比性差}：RMSE、MAE等指标在不同量纲下的数值无法直接比较
+\end{itemize}
+
+为解决上述问题，本研究引入 Z-Score 标准化策略对认知评分标签进行预处理，使模型能够在统一的数值空间中进行优化。
+
+\subsubsection{数学定义}
+
+给定训练集 $\mathcal{D}_{\text{train}} = \{(\mathcal{G}_i, y_i)\}_{i=1}^{N_{\text{train}}}$，其中 $y_i \in \mathbb{R}$ 为原始认知评分标签，Z-Score 标准化的数学定义为：
+
+\begin{equation}
+y_i^{\text{norm}} = \frac{y_i - \mu_y}{\sigma_y + \epsilon}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\mu_y = \frac{1}{N_{\text{train}}} \sum_{i=1}^{N_{\text{train}}} y_i$：训练集标签的均值
+    \item $\sigma_y = \sqrt{\frac{1}{N_{\text{train}}} \sum_{i=1}^{N_{\text{train}}} (y_i - \mu_y)^2}$：训练集标签的标准差
+    \item $\epsilon = 10^{-8}$：数值稳定项，防止除零错误
+\end{itemize}
+
+标准化后的标签 $y_i^{\text{norm}}$ 具有零均值、单位方差的统计特性：
+
+\begin{equation}
+\mathbb{E}[y^{\text{norm}}] = 0, \quad \text{Var}[y^{\text{norm}}] = 1
+\end{equation}
+
+\subsubsection{参数估计策略}
+
+为确保标准化参数仅来源于训练数据，防止信息泄露（data leakage），本方法采用以下策略：
+
+\begin{enumerate}
+    \item \textbf{仅使用训练集计算统计量}：均值 $\mu_y$ 和标准差 $\sigma_y$ 仅从训练集标签估计
+    \item \textbf{固定标准化参数}：在验证集和测试集上使用训练集估计的参数进行标准化/反标准化
+    \item \textbf{与模型参数分离存储}：标准化参数作为元数据保存，不参与梯度更新
+\end{enumerate}
+
+数学表达：
+
+\begin{equation}
+\hat{\mu}_y = \frac{1}{|\mathcal{D}_{\text{train}}|} \sum_{(\mathcal{G}, y) \in \mathcal{D}_{\text{train}}} y, \quad \hat{\sigma}_y = \sqrt{\frac{1}{|\mathcal{D}_{\text{train}}|} \sum_{(\mathcal{G}, y) \in \mathcal{D}_{\text{train}}} (y - \hat{\mu}_y)^2}
+\end{equation}
+
+验证集和测试集的标准化：
+
+\begin{equation}
+y_{\text{val/test}}^{\text{norm}} = \frac{y_{\text{val/test}} - \hat{\mu}_y}{\hat{\sigma}_y + \epsilon}
+\end{equation}
+
+\subsubsection{训练阶段的标签标准化流程}
+
+在模型前向传播过程中，原始标签 $y$ 首先经过标准化转换为 $y^{\text{norm}}$，然后与模型预测值 $\hat{y}^{\text{norm}}$ 计算损失：
+
+\begin{equation}
+\mathcal{L}_{\text{cog}}^{\text{norm}} = \frac{1}{B} \sum_{i=1}^{B} \text{SmoothL1}\left(y_i^{\text{norm}}, \hat{y}_i^{\text{norm}}\right)
+\end{equation}
+
+其中 $\hat{y}^{\text{norm}}$ 为模型在标准化空间中的预测输出。
+
+这种设计的优势在于：
+
+\begin{itemize}
+    \item \textbf{梯度归一化}：标准化后的标签具有相同的数值尺度，损失函数的梯度量级更加均衡
+    \item \textbf{优化 Landscape 改善}：标准化空间的损失曲面更加平滑，有利于优化器收敛
+    \item \textbf{超参数通用性}：学习率等超参数对不同标签具有更好的迁移性
+\end{itemize}
+
+\subsubsection{预测结果的反标准化}
+
+在评估阶段，模型输出的标准化预测值需要反标准化回原始量纲，以获得具有实际物理意义的预测结果：
+
+\begin{equation}
+\hat{y}^{\text{real}} = \hat{y}^{\text{norm}} \cdot \hat{\sigma}_y + \hat{\mu}_y
+\end{equation}
+
+反标准化的计算流程：
+
+\begin{verbatim}
+lb_pred_norm = model(g_data)          # 前向传播，输出标准化预测
+lb_pred_real = lb_pred_norm * lb_std + lb_mean  # 反标准化到原始量纲
+loss = SmoothL1(lb_pred_real, y_real)  # 使用原始量纲计算评估指标
+\end{verbatim}
+
+\subsubsection{模型可解释性阶段的一致性处理}
+
+在模型可解释性分析中，为确保梯度量级的物理意义正确，反标准化操作需在损失计算前执行：
+
+\begin{equation}
+\mathcal{L}_{\text{saliency}} = \frac{1}{B} \sum_{i=1}^{B} \left| \hat{y}_i^{\text{real}} - y_i^{\text{real}} \right| = \frac{1}{B} \sum_{i=1}^{B} \left| \hat{y}_i^{\text{norm}} \cdot \hat{\sigma}_y + \hat{\mu}_y - y_i^{\text{real}} \right|
+\end{equation}
+
+这一处理确保了梯度反向传播时，输入边属性接收到的梯度具有正确的量级，能够准确反映各边对原始量纲预测结果的贡献。
+
+\subsubsection{与零填充处理的关系}
+
+标准化参数 $\hat{\mu}_y$ 和 $\hat{\sigma}_y$ 与边权重的零填充（Zero-Filling）策略存在内在一致性。当某条边不存在时，其权重被填充为 0，而标准化标签的均值恰好为 0，这意味着缺失连接与标准化标签空间处于同一数值区间，有利于模型学习处理缺失数据的能力。
+
+\subsubsection{方法学优势总结}
+
+本研究采用的标签 Z-Score 标准化策略具有以下方法学优势：
+
+\begin{enumerate}
+    \item \textbf{端到端优化一致性}：训练、验证、测试和评估阶段采用一致的标准化流程，确保模型学习与评估的一致性
+    
+    \item \textbf{数值稳定性增强}：标准化后的标签具有零均值、单位方差特性，有效改善深度网络训练中的梯度问题
+    
+    \item \textbf{多任务公平性}：不同量纲的认知评分经标准化后具有可比性，模型能够同时优化多个标签任务
+    
+    \item \textbf{信息泄露防护}：标准化参数严格基于训练集估计，防止验证集和测试集信息泄露
+    
+    \item \textbf{可解释性保证}：反标准化操作保留了预测结果的原始物理含义，便于生物学解释
+\end{enumerate}
+
+与简单的 Min-Max 归一化相比，Z-Score 标准化不受极端值影响，能够更稳健地处理标签分布中的异常值。
+
+\newpage
+
+\subsection{模型可解释性损失}
+
+在模型解释阶段，使用L1损失计算显著性图梯度：
+
+\begin{equation}
+\mathcal{L}_{\text{saliency}} = \frac{1}{B} \sum_{i=1}^{B} | \hat{y}_i - y_i |
+\end{equation}
+
+该损失用于反向传播计算边属性梯度：
+
+\begin{equation}
+\frac{\partial \mathcal{L}_{\text{saliency}}}{\partial \mathbf{E}_{ij,r}} = \frac{\partial \mathcal{L}_{\text{saliency}}}{\partial \hat{y}} \cdot \frac{\partial \hat{y}}{\partial \mathbf{E}_{ij,r}}
+\end{equation}
+
+显著性图为：
+\begin{equation}
+S_{ij,r} = \left| \frac{\partial \mathcal{L}}{\partial \mathbf{E}_{ij,r}} \right|
+\end{equation}
+
+\newpage
+
+\section{基于梯度反转机制的异质性人口学协变量矫正策略}
+
+\subsection{研究背景与问题定义}
+
+在脑认知功能的预测研究中，年龄和性别作为重要的人口学变量，与认知功能评分之间存在显著的统计学关联。若模型在特征学习过程中捕获了这些协变量信息，则其预测能力可能部分源于对人口学差异的拟合，而非真正反映脑网络拓扑结构与认知功能之间的生物学关联。这种混杂效应（confounding effect）会降低模型的可解释性，限制研究结论的泛化能力。
+
+为确保模型提取的脑网络特征纯粹反映认知能力而非受试者的年龄或性别差异，本研究引入了对抗去偏（Adversarial Debiasing）框架。该框架的核心思想是通过梯度反转层（Gradient Reversal Layer, GRL）构建多任务学习架构，强制特征提取器进入判别器的零空间，从而学习到混淆变量不变（Confounder-invariant）的表征。
+
+\subsection{梯度反转层的数学原理}
+
+梯度反转层是一种特殊的神经网络层，其在前向传播时保持输入不变，而在反向传播时反转梯度方向。
+
+\subsubsection{前向传播}
+
+设输入向量为 $\mathbf{x} \in \mathbb{R}^d$，GRL 的前向传播定义为恒等映射：
+
+\begin{equation}
+\mathcal{R}(\mathbf{x}) = \mathbf{x}
+\end{equation}
+
+其中 $\mathcal{R}(\cdot)$ 表示梯度反转操作。
+
+\subsubsection{反向传播}
+
+在反向传播阶段，GRL 将来自上层的梯度 $\frac{\partial \mathcal{L}}{\partial \mathbf{x}'}$ 反转并缩放后传递给下层：
+
+\begin{equation}
+\frac{\partial \mathcal{L}}{\partial \mathbf{x}} = -\lambda \cdot \frac{\partial \mathcal{L}}{\partial \mathbf{x}'}
+\end{equation}
+
+其中 $\lambda > 0$ 为梯度反转的缩放系数（本文实验中取 $\lambda = 1.0$）。
+
+这一机制在数学上等价于在特征提取器与对抗分类器之间建立了一个零和博弈：特征提取器试图学习能够预测认知评分的判别性特征，同时尽可能降低对抗分类器的预测性能；而对抗分类器则试图利用这些特征准确预测年龄和性别。两个目标的博弈平衡迫使特征提取器进入对抗分类器的零空间。
+
+\subsection{异质性人口学协变量的统一映射策略}
+
+本研究涉及多个数据集（S1200、ABCD、HCD），各数据集的人口学信息记录方式存在异质性。为实现跨数据集的统一处理，本研究设计了针对性的数值化映射策略。
+
+\subsubsection{年龄信息的统一数值化}
+
+年龄信息的异质性主要体现在数据类型和取值范围上：
+
+\begin{itemize}
+    \item \textbf{S1200 数据集（区间型）}：采用中值映射法，将定序变量转化为定距变量：
+    \begin{equation}
+    \text{age} = \begin{cases}
+    28.0 & \text{if } \text{Age} = \text{``26-30''} \\
+    33.0 & \text{if } \text{Age} = \text{``31-35''} \\
+    37.0 & \text{if } \text{Age} = \text{``36+''} \\
+    \end{cases}
+    \end{equation}
+    一般形式为：
+    \begin{equation}
+    \text{age} = \frac{\text{low} + \text{high}}{2} \quad \text{for } \text{``low-high''} \quad \text{or} \quad \text{low} + 1 \quad \text{for } \text{``low+''}
+    \end{equation}
+
+    \item \textbf{ABCD 数据集（离散整型）}：年龄仅包含 9 和 10 两个值，直接保留原始数值作为连续变量处理。
+
+    \item \textbf{HCD 数据集（连续型）}：直接保留原始 interview\_age 数值。
+\end{itemize}
+
+统一的年龄处理函数定义为：
+
+\begin{equation}
+\text{process\_age}(v) = \begin{cases}
+\frac{\text{low} + \text{high}}{2} & \text{if } v \text{ contains } \text{``-''} \\
+\text{parse}(v) + 1 & \text{if } v \text{ contains } \text{``+''} \\
+\text{parse}(v) & \text{otherwise}
+\end{cases}
+\end{equation}
+
+\subsubsection{性别信息的二值化}
+
+性别信息的异质性体现在标签格式的多样性上。本研究采用统一二值映射：
+
+\begin{equation}
+\text{gender} = \begin{cases}
+1.0 & \text{if } s \in \{ \text{``M''}, \text{``MALE''}, \text{``1''}, \text{``1.0''} \} \\
+0.0 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+其中 1.0 表示男性（Male），0.0 表示女性（Female）。
+
+\subsection{多任务对抗学习架构}
+
+基于 GRL 机制，本研究构建了包含主任务和对抗任务的多任务学习架构。
+
+\subsubsection{模型输出结构}
+
+模型的前向传播过程扩展为三个输出分支：
+
+\begin{equation}
+(\hat{y}_{\text{cog}}, \hat{y}_{\text{age}}, \hat{y}_{\text{gender}}) = f_{\text{LGUNet\_rela}}(\mathcal{G})
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\hat{y}_{\text{cog}} \in \mathbb{R}$：主任务的认知功能预测值
+    \item $\hat{y}_{\text{age}} \in \mathbb{R}$：对抗任务的年龄预测值
+    \item $\hat{y}_{\text{gender}} \in \mathbb{R}$：对抗任务的性别 logits 输出
+\end{itemize}
+
+\subsubsection{网络结构}
+
+对抗预测分支采用与主任务预测头相似的 MLP 结构：
+
+\begin{equation}
+\hat{y}_{\text{age}} = \mathbf{W}_{\text{age},2} \cdot \sigma\left( \mathbf{W}_{\text{age},1} \cdot \mathcal{R}(\mathbf{h}_g) + \mathbf{b}_{\text{age},1} \right) + \mathbf{b}_{\text{age},2}
+\end{equation}
+
+\begin{equation}
+\hat{y}_{\text{gender}} = \mathbf{W}_{\text{gender},2} \cdot \sigma\left( \mathbf{W}_{\text{gender},1} \cdot \mathcal{R}(\mathbf{h}_g) + \mathbf{b}_{\text{gender},1} \right) + \mathbf{b}_{\text{gender},2}
+\end{equation}
+
+其中 $\mathcal{R}(\cdot)$ 表示 GRL 操作，$\mathbf{h}_g$ 为 Readout 层输出的全局图特征。
+
+网络参数配置与主任务预测头保持一致：输入维度为 $2 \times F_{\text{hidden}}$，隐藏层维度为 $F_{\text{hidden}}$，输出维度为 1。Dropout 比率与主任务共享。
+
+\subsection{复合损失函数}
+
+总损失函数定义为主任务损失与对抗任务损失的加权和：
+
+\begin{equation}
+\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{cog}} + \lambda_{\text{age}} \cdot \mathcal{L}_{\text{age}} + \lambda_{\text{gender}} \cdot \mathcal{L}_{\text{gender}}
+\end{equation}
+
+其中：
+
+\begin{itemize}
+    \item \textbf{主任务损失（认知预测）}：
+    \begin{equation}
+    \mathcal{L}_{\text{cog}} = \frac{1}{B} \sum_{i=1}^{B} \text{SmoothL1}(y_i^{\text{cog}}, \hat{y}_i^{\text{cog}})
+    \end{equation}
+
+    \item \textbf{对抗任务损失 1（年龄回归）}：
+    \begin{equation}
+    \mathcal{L}_{\text{age}} = \frac{1}{B} \sum_{i=1}^{B} \text{SmoothL1}(\text{age}_i, \hat{y}_i^{\text{age}})
+    \end{equation}
+
+    \item \textbf{对抗任务损失 2（性别分类）}：
+    \begin{equation}
+    \mathcal{L}_{\text{gender}} = \frac{1}{B} \sum_{i=1}^{B} \text{BCEWithLogits}(\text{gender}_i, \hat{y}_i^{\text{gender}})
+    \end{equation}
+\end{itemize}
+
+其中 $\lambda_{\text{age}} = \lambda_{\text{gender}} = 1.0$ 为对抗损失的权重系数。
+
+\subsection{协变量数据的动态注入机制}
+
+为保证数据加载效率，本研究设计了协变量数据与图结构的分离存储与动态注入机制。
+
+\subsubsection{缓存兼容性处理}
+
+当从磁盘缓存加载预处理的图结构时，系统自动为加载的图数据注入协变量属性：
+
+\begin{equation}
+\mathcal{G}_i.\text{age} = \text{age\_map}[\text{subj}_i], \quad \mathcal{G}_i.\text{gender} = \text{gender\_map}[\text{subj}_i]
+\end{equation}
+
+这一设计确保了：
+\begin{itemize}
+    \item 旧缓存文件可以被正确扩展，无需重新解析 CSV
+    \item 同一缓存文件可适配不同的协变量列配置
+    \item 训练与评估阶段的数据加载逻辑保持一致
+\end{itemize}
+
+\subsubsection{数据集配置解析}
+
+协变量列名通过数据集配置文件动态获取：
+
+\begin{equation}
+\text{gender\_col} = \text{tgt\_label\_list}[1], \quad \text{age\_col} = \text{tgt\_label\_list}[2]
+\end{equation}
+
+这一设计避免了硬编码列名，降低了跨数据集迁移时的配置错误率。
+
+\subsection{评估阶段的解耦策略}
+
+在模型评估（evaluate）和可解释性分析（explain\_model）阶段，仅使用主任务输出进行性能度量，忽略对抗分支的预测结果：
+
+\begin{equation}
+\hat{y}_{\text{cog}}^{\text{eval}} = \hat{y}_{\text{cog}}
+\end{equation}
+
+这一设计确保了：
+\begin{itemize}
+    \item 评估指标的计算与基线模型完全兼容
+    \item 可解释性分析的梯度计算不受对抗任务干扰
+    \item 模型推理代码无需大幅修改即可适配新架构
+\end{itemize}
+
+\subsection{方法学意义}
+
+本节提出的基于梯度反转机制的异质性人口学协变量矫正策略，具有以下方法学意义：
+
+\begin{enumerate}
+    \item \textbf{去混杂效应的端到端实现}：通过对抗学习框架，在模型训练过程中自动消除人口学协变量带来的预测偏差，无需额外的后处理步骤。
+
+    \item \textbf{跨数据集的通用性}：统一的数值化映射策略使得同一套模型架构可以处理不同来源的人口学数据，提高了方法的适用范围。
+
+    \item \textbf{语义一致性的保证}：对抗分支的引入仅影响特征学习过程，不改变模型的输入输出接口，确保了与现有评估框架的兼容性。
+
+    \item \textbf{可解释性的增强}：通过强制特征进入协变量分类器的零空间，模型被迫依赖与年龄和性别无关的脑网络拓扑结构进行认知预测，这些特征更具生物学可解释性。
+\end{enumerate}
+
+\subsection{梯度反转层算法实现}
+
+本小节给出梯度反转层（Gradient Reversal Layer, GRL）的具体算法实现伪代码，如算法~\ref{alg:grl}所示。
+
+\section*{算法环境配置说明}
+由于算法伪代码环境配置方式不同，本文档采用 \texttt{algorithm2e} 宏包进行算法伪代码排版。
+
+\begin{algorithm}
+  \centering
+  \caption{梯度反转层（Gradient Reversal Layer）}
+  \label{alg:grl}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\mathbf{x} \in \mathbb{R}^d$：输入特征向量；$\alpha$：梯度反转缩放系数
+  \ENSURE $\mathbf{x}' = \mathbf{x}$：前向传播输出；$-\alpha \cdot \frac{\partial \mathcal{L}}{\partial \mathbf{x}'}$：反向传播梯度
+
+  \STATE \COMMENT{前向传播：恒等映射}
+  \STATE $\ctx.\alpha \leftarrow \alpha$
+  \STATE \RETURN $\mathbf{x}$
+  \STATE \COMMENT{反向传播：梯度反转}
+  \STATE $\mathbf{g}_{\text{forward}} \leftarrow \texttt{grad\_output}$
+  \STATE $\mathbf{g}_{\text{backward}} \leftarrow -\ctx.\alpha \cdot \mathbf{g}_{\text{forward}}$
+  \STATE \RETURN $\mathbf{g}_{\text{backward}}, \texttt{None}$
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+  \centering
+  \caption{LGUNet\_rela 模型前向传播（含GRL对抗机制）}
+  \label{alg:lgpunet_rela_forward}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\mathcal{G} = (\mathbf{X}, \mathbf{A}, \mathbf{E})$：脑网络图数据；$\mathbf{y}_{\text{cog}}$：认知评分标签
+  \ENSURE $\hat{y}_{\text{cog}}$：认知预测输出；$\hat{y}_{\text{age}}$：年龄对抗输出；$\hat{y}_{\text{gender}}$：性别对抗输出
+
+  \STATE \COMMENT{特征提取阶段}
+  \STATE $\mathbf{x}^{(0)}, \mathbf{A}^{(0)}, \mathbf{E}^{(0)} \leftarrow \text{InputLayer}(\mathbf{X}, \mathbf{A}, \mathbf{E})$
+  \STATE $\mathbf{x} \leftarrow \sigma(\mathbf{x}^{(0)})$
+  \STATE $\mathbf{xs} \leftarrow [\mathbf{x}]$
+  \STATE \COMMENT{编码器：层级图卷积与池化}
+  \FOR{$l = 1 \textbf{ to } D$}
+    \STATE $\mathbf{x}, \mathbf{A}, \mathbf{E}, \text{batch} \leftarrow \text{LGMVPool}_l(\mathbf{x}, \mathbf{A}, \mathbf{E}, \mathbf{y}_{\text{cog}}, \text{batch})$
+    \STATE $\mathbf{x}, \mathbf{A}, \mathbf{E} \leftarrow \text{relationGCN}_l(\mathbf{x}, \mathbf{A}, \mathbf{E})$
+    \STATE $\mathbf{x} \leftarrow \text{Dropout}(\mathbf{x}, p=0.5)$
+    \STATE $\mathbf{x} \leftarrow \sigma(\mathbf{x})$
+    \STATE $\mathbf{xs} \leftarrow \mathbf{xs} \cup [\mathbf{x}]$
+  \ENDFOR
+
+  \STATE \COMMENT{层级Readout：多尺度特征聚合}
+  \STATE $\mathbf{h}_g \leftarrow \mathbf{0}$
+  \FOR{$\mathbf{x}^{(l)} \in \mathbf{xs}$}
+    \STATE $\mathbf{h}_{\text{gap}} \leftarrow \text{GAP}(\mathbf{x}^{(l)})$
+    \STATE $\mathbf{h}_{\text{gmp}} \leftarrow \text{GMP}(\mathbf{x}^{(l)})$
+    \STATE $\mathbf{h}_g \leftarrow \mathbf{h}_g + [\mathbf{h}_{\text{gap}} ; \mathbf{h}_{\text{gmp}}]$
+  \ENDFOR
+
+  \STATE \COMMENT{主任务分支：认知能力预测}
+  \STATE $\mathbf{h}_1 \leftarrow \sigma(\mathbf{W}_1 \mathbf{h}_g + \mathbf{b}_1)$
+  \STATE $\mathbf{h}_1 \leftarrow \text{Dropout}(\mathbf{h}_1, p)$
+  \STATE $\mathbf{h}_2 \leftarrow \sigma(\mathbf{W}_2 \mathbf{h}_1 + \mathbf{b}_2)$
+  \STATE $\mathbf{h}_2 \leftarrow \text{Dropout}(\mathbf{h}_2, p)$
+  \STATE $\hat{y}_{\text{cog}} \leftarrow \mathbf{W}_3 \mathbf{h}_2 + \mathbf{b}_3$
+
+  \STATE \COMMENT{对抗分支：通过GRL反转梯度}
+  \STATE $\tilde{\mathbf{h}}_g \leftarrow \text{GradientReversalLayer}(\mathbf{h}_g, \alpha=1.0)$
+  \STATE $\mathbf{h}_{\text{age},1} \leftarrow \sigma(\mathbf{W}_{\text{age},1} \tilde{\mathbf{h}}_g + \mathbf{b}_{\text{age},1})$
+  \STATE $\hat{y}_{\text{age}} \leftarrow \mathbf{W}_{\text{age},2} \mathbf{h}_{\text{age},1} + \mathbf{b}_{\text{age},2}$
+  \STATE $\mathbf{h}_{\text{gender},1} \leftarrow \sigma(\mathbf{W}_{\text{gender},1} \tilde{\mathbf{h}}_g + \mathbf{b}_{\text{gender},1})$
+  \STATE $\hat{y}_{\text{gender}} \leftarrow \mathbf{W}_{\text{gender},2} \mathbf{h}_{\text{gender},1} + \mathbf{b}_{\text{gender},2}$
+
+  \RETURN $\hat{y}_{\text{cog}}, \hat{y}_{\text{age}}, \hat{y}_{\text{gender}}$
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+  \centering
+  \caption{对抗去偏训练流程}
+  \label{alg:adversarial_training}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\mathcal{D}_{\text{train}}$：训练数据集；$T$：训练轮数；$B$：批次大小
+  \ENSURE 训练好的模型参数 $\Theta^*$
+
+  \STATE \COMMENT{主循环}
+  \FOR{$t = 1 \textbf{ to } T$}
+    \STATE \COMMENT{加载批次数据}
+    \STATE $\mathcal{B} \leftarrow \text{SampleBatch}(\mathcal{D}_{\text{train}}, B)$
+    \STATE \COMMENT{前向传播}
+    \FOR{$(\mathcal{G}_i, y_i^{\text{cog}}, \text{age}_i, \text{gender}_i) \in \mathcal{B}$}
+      \STATE $(\hat{y}_i^{\text{cog}}, \hat{y}_i^{\text{age}}, \hat{y}_i^{\text{gender}}) \leftarrow f_{\Theta}(\mathcal{G}_i)$
+      \STATE \COMMENT{计算主任务损失}
+      \STATE $\mathcal{L}_i^{\text{cog}} \leftarrow \text{SmoothL1}(y_i^{\text{cog}}, \hat{y}_i^{\text{cog}})$
+      \STATE \COMMENT{计算对抗损失}
+      \STATE $\mathcal{L}_i^{\text{age}} \leftarrow \text{SmoothL1}(\text{age}_i, \hat{y}_i^{\text{age}})$
+      \STATE $\mathcal{L}_i^{\text{gender}} \leftarrow \text{BCEWithLogits}(\text{gender}_i, \hat{y}_i^{\text{gender}})$
+      \STATE \COMMENT{复合损失}
+      \STATE $\mathcal{L}_i \leftarrow \mathcal{L}_i^{\text{cog}} + \lambda_{\text{age}} \cdot \mathcal{L}_i^{\text{age}} + \lambda_{\text{gender}} \cdot \mathcal{L}_i^{\text{gender}}$
+    \ENDFOR
+    \STATE \COMMENT{批次平均损失}
+    \STATE $\mathcal{L}_{\text{batch}} \leftarrow \frac{1}{B} \sum_{i=1}^{B} \mathcal{L}_i$
+    \STATE \COMMENT{反向传播与参数更新}
+    \STATE $\Theta \leftarrow \Theta - \eta \cdot \nabla_{\Theta} \mathcal{L}_{\text{batch}}$
+  \ENDFOR
+  \RETURN $\Theta$
+  \end{algorithmic}
+\end{algorithm}
+
+\newpage
+
+\section{多关系图可解释性的增强方法}
+
+\subsection{多关系图的结构特殊性}
+
+在脑网络建模中，结构连接（SC）和功能连接（FC）代表了不同模态的脑区交互信息。为充分捕获这些异质性交互模式，本研究采用多关系图表示，其中每条边包含 $R$ 个关系通道的特征向量：
+
+\begin{equation}
+\mathbf{e}_{ij} = [e_{ij}^{(1)}, e_{ij}^{(2)}, \ldots, e_{ij}^{(R)}] \in \mathbb{R}^R
+\end{equation}
+
+在本文的配置中，$R = 3$，三个通道分别编码：
+\begin{itemize}
+    \item 通道 1（$r=1$）：结构连接特征（如 FA、纤维计数）
+    \item 通道 2（$r=2$）：功能连接正值
+    \item 通道 3（$r=3$）：功能连接负值
+\end{itemize}
+
+这种多关系表示为可解释性分析带来了独特挑战：不同关系通道的边属性具有不同的物理含义和数值分布，直接聚合可能导致生物学解释的失真。
+
+\subsection{Input × Gradient 显著性计算方法}
+
+传统的梯度显著性方法（如 Vanilla Gradient）直接使用梯度绝对值作为重要性度量：
+
+\begin{equation}
+S_{ij,r}^{\text{vanilla}} = \left| \frac{\partial \mathcal{L}}{\partial e_{ij,r}} \right|
+\end{equation}
+
+然而，该方法忽略了输入特征的量级差异。当不同通道的边属性取值范围差异较大时，梯度值的大小可能主要反映的是输入规模而非真实的特征贡献。
+
+为解决这一问题，本研究采用 Input × Gradient 方法（也称 Gradient-weighted Class Activation Mapping，Grad-CAM 的边版本），计算每个边属性的真实贡献度：
+
+\begin{equation}
+S_{ij,r}^{\text{IxG}} = \left| e_{ij,r} \cdot \frac{\partial \mathcal{L}}{\partial e_{ij,r}} \right|
+\end{equation}
+
+该方法的物理意义在于：梯度的方向反映了``损失增加最快的方向''，而输入值反映了``该方向上的位移量''。二者的乘积量化了特征值变化对损失的边际贡献。
+
+与 Vanilla Gradient 的对比：
+
+\begin{equation}
+S_{ij,r}^{\text{IxG}} = |e_{ij,r}| \cdot \left| \frac{\partial \mathcal{L}}{\partial e_{ij,r}} \right| \geq S_{ij,r}^{\text{vanilla}}
+\end{equation}
+
+当 $|e_{ij,r}| > 1$ 时，IxG 方法放大显著性值；当 $|e_{ij,r}| < 1$ 时，缩小显著性值。这一特性使得显著性分数更能反映特征在预测中的真实作用。
+
+\subsection{多关系通道的独立归一化策略}
+
+由于不同关系通道的边属性具有不同的物理含义和数值分布，直接对所有通道求平均会导致``量纲屏蔽''效应——即数值较大的通道会主导最终的显著性矩阵，而数值较小但可能更具生物学意义的通道被忽略。
+
+为解决这一问题，本研究采用通道独立的 Min-Max 归一化策略：
+
+\begin{equation}
+S_{ij,r}^{\text{norm}} = \frac{S_{ij,r}^{\text{IxG}} - \min_r S_{ij,r}^{\text{IxG}}}{\max_r S_{ij,r}^{\text{IxG}} - \min_r S_{ij,r}^{\text{IxG}}}
+\end{equation}
+
+对于每个关系通道 $r$，首先提取其所有边的 IxG 显著性值：
+
+\begin{equation}
+\mathbf{S}_r^{\text{IxG}} = \{ S_{ij,r}^{\text{IxG}} \mid (i,j) \in \mathcal{E} \}
+\end{equation}
+
+然后独立归一化到 $[0, 1]$ 区间：
+
+\begin{equation}
+\mathbf{S}_r^{\text{norm}} = \frac{\mathbf{S}_r^{\text{IxG}} - \min(\mathbf{S}_r^{\text{IxG}})}{\max(\mathbf{S}_r^{\text{IxG}}) - \min(\mathbf{S}_r^{\text{IxG}})}
+\end{equation}
+
+最后，将归一化后的各通道显著性填入对应位置，构建完整的 $N \times N \times R$ 显著性张量：
+
+\begin{equation}
+\mathbf{S}^{\text{full}}_{ij,r} = S_{ij,r}^{\text{norm}} \quad \text{if } (i,j) \in \mathcal{E}
+\end{equation}
+
+\subsection{对称性约束与矩阵构建}
+
+脑网络通常被建模为无向图，因此邻接矩阵应满足对称性约束：
+
+\begin{equation}
+\mathbf{S}^{\text{full}}_{ij,r} = \mathbf{S}^{\text{full}}_{ji,r}
+\end{equation}
+
+在矩阵构建过程中，对每条边 $(i, j)$ 的显著性值同时赋值给 $(i, j)$ 和 $(j, i)$ 位置，确保对称性：
+
+\begin{verbatim}
+for each edge (i, j):
+    sal_mat[i, j, r] = sal_r_norm[k]
+    sal_mat[j, i, r] = sal_r_norm[k]
+\end{verbatim}
+
+这一对称性约束基于以下生物学假设：脑区 $i$ 与脑区 $j$ 之间的连接重要性在两个方向上是等价的。
+
+\subsection{样本级别的显著性聚合}
+
+由于每个测试样本产生一张显著性矩阵（维度为 $N \times N \times R$），需要将其聚合为群体水平的代表性矩阵。
+
+采用均值聚合策略：
+
+\begin{equation}
+\bar{S}_{ij,r} = \frac{1}{M} \sum_{m=1}^{M} S_{ij,r}^{(m)}
+\end{equation}
+
+其中 $M$ 为测试样本数量，$S_{ij,r}^{(m)}$ 为第 $m$ 个样本在关系通道 $r$ 上的显著性值。
+
+均值聚合的优势在于：
+\begin{itemize}
+    \item 保留所有样本的信息，避免极端值主导
+    \item 计算简单，便于重复验证
+    \item 生成的代表性矩阵可以直接用于群体水平的生物学解释
+\end{itemize}
+
+\subsection{边阈值筛选与可视化}
+
+为生成清晰的脑3D连接图，采用百分位数阈值筛选策略，仅展示重要性最高的部分边：
+
+\begin{equation}
+\tau_r = P_{98}\left( \left\{ S_{ij,r}^{\text{IxG}} \mid (i,j) \in \mathcal{E}, S_{ij,r}^{\text{IxG}} > 0 \right\} \right)
+\end{equation}
+
+\begin{equation}
+\mathcal{E}_{\text{top},r} = \left\{ (i,j) \mid S_{ij,r}^{\text{IxG}} > \tau_r \right\}
+\end{equation}
+
+其中 $P_{98}(\cdot)$ 表示第 98 百分位数，仅展示重要性最高的前 2\% 边。
+
+可视化时，为每个关系通道独立生成连接图：
+\begin{itemize}
+    \item SC 通道（FA/fiber\_count）：揭示结构连接中对认知功能贡献最大的白质通路
+    \item FC 正通道（pcc\_rest\_pos）：揭示功能同步性最强的脑区对
+    \item FC 负通道（pcc\_rest\_neg）：揭示功能拮抗性最强的脑区对
+\end{itemize}
+
+这种分通道可视化策略使得研究者可以独立分析不同模态连接的认知贡献。
+
+\begin{algorithm}
+  \centering
+  \caption{Input $\times$ Gradient 显著性图计算流程}
+  \label{alg:saliency_computation}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $f(\cdot)$：训练好的LGUNet\_rela模型；$\mathcal{G} = (\mathbf{X}, \mathbf{A}, \mathbf{E})$：测试样本；$y$：真实标签
+  \ENSURE $\mathbf{S}^{\text{norm}} \in \mathbb{R}^{N \times N \times R}$：归一化显著性矩阵
+
+  \STATE \COMMENT{步骤1：启用边属性梯度计算}
+  \STATE $\mathbf{E}.\text{requires\_grad} \leftarrow \texttt{True}$
+  \STATE \COMMENT{步骤2：前向传播}
+  \STATE $\hat{y} \leftarrow f(\mathcal{G})$
+  \STATE \COMMENT{步骤3：计算显著性损失并反向传播}
+  \STATE $\mathcal{L}_{\text{saliency}} \leftarrow |\hat{y} - y|$
+  \STATE $\texttt{backward}(\mathcal{L}_{\text{saliency}})$
+  \STATE \COMMENT{步骤4：提取梯度}
+  \STATE $\mathbf{G} \leftarrow \frac{\partial \mathcal{L}_{\text{saliency}}}{\partial \mathbf{E}}$
+  \STATE \COMMENT{步骤5：计算Input $\times$ Gradient显著性}
+  \FOR{$r = 1 \textbf{ to } R$}
+    \FOR{each edge $k$ where $\mathbf{A}[0,k] = i, \mathbf{A}[1,k] = j$}
+      \STATE $S_{ij,r} \leftarrow |\mathbf{E}_{k,r} \cdot \mathbf{G}_{k,r}|$
+    \ENDFOR
+  \ENDFOR
+  \STATE \COMMENT{步骤6：通道独立Min-Max归一化}
+  \FOR{$r = 1 \textbf{ to } R$}
+    \STATE $\mathbf{S}_r \leftarrow \{ S_{ij,r} \mid (i,j) \in \mathcal{E} \}$
+    \STATE $s_{\min} \leftarrow \min(\mathbf{S}_r)$
+    \STATE $s_{\max} \leftarrow \max(\mathbf{S}_r)$
+    \STATE $S_{ij,r}^{\text{norm}} \leftarrow \frac{S_{ij,r} - s_{\min}}{s_{\max} - s_{\min}}$
+  \ENDFOR
+  \STATE \COMMENT{步骤7：构建对称显著性矩阵}
+  \STATE $\mathbf{S}^{\text{full}} \leftarrow \mathbf{0}_{N \times N \times R}$
+  \FOR{each edge $(i,j)$}
+    \FOR{$r = 1 \textbf{ to } R$}
+      \STATE $\mathbf{S}^{\text{full}}_{ij,r} \leftarrow S_{ij,r}^{\text{norm}}$
+      \STATE $\mathbf{S}^{\text{full}}_{ji,r} \leftarrow S_{ij,r}^{\text{norm}}$
+    \ENDFOR
+  \ENDFOR
+  \RETURN $\mathbf{S}^{\text{full}}$
+  \end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}
+  \centering
+  \caption{群体水平显著性聚合与可视化筛选}
+  \label{alg:saliency_aggregation}
+  \small
+  \begin{algorithmic}[1]
+  \REQUIRE $\{\mathbf{S}^{(m)}\}_{m=1}^{M}$：$M$个测试样本的显著性矩阵；$\tau$：百分位阈值（默认98）
+  \ENSURE $\bar{\mathbf{S}}$：聚合后的显著性矩阵；$\mathcal{E}_{\text{top}}$：待可视化边集
+
+  \STATE \COMMENT{步骤1：群体均值聚合}
+  \STATE $\bar{\mathbf{S}} \leftarrow \frac{1}{M} \sum_{m=1}^{M} \mathbf{S}^{(m)}$
+  \STATE \COMMENT{步骤2：阈值筛选Top边}
+  \STATE $\mathbf{S}_{\text{nonzero}} \leftarrow \{ \bar{S}_{ij,r} \mid \bar{S}_{ij,r} > 0 \}$
+  \STATE $\tau_{\text{thresh}} \leftarrow P_{\tau}(\mathbf{S}_{\text{nonzero}})$
+  \STATE \COMMENT{步骤3：提取高显著性边集}
+  \STATE $\mathcal{E}_{\text{top}} \leftarrow \{ (i,j,r) \mid \bar{S}_{ij,r} > \tau_{\text{thresh}} \}$
+  \RETURN $\bar{\mathbf{S}}, \mathcal{E}_{\text{top}}$
+  \end{algorithmic}
+\end{algorithm}
+
+\subsection{方法对比与创新点总结}
+
+表~\ref{tab:interpretability_comparison} 总结了三代显著性计算方法的特性对比。
+
+\begin{table}[htbp]
+\centering
+\caption{显著性计算方法对比}
+\label{tab:interpretability_comparison}
+\begin{tabular}{lccc}
+\toprule
+特性 & Vanilla Gradient & Guided Backprop & Input × Gradient \\
+\midrule
+计算复杂度 & $\mathcal{O}(1)$ & $\mathcal{O}(1)$ & $\mathcal{O}(1)$ \\
+考虑输入量级 & 否 & 否 & 是 \\
+通道独立归一化 & 否 & 否 & 是 \\
+对称性约束 & 可选 & 可选 & 可选 \\
+生物学可解释性 & 中等 & 中等 & 高 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+本研究的可解释性增强方法具有以下创新点：
+
+\begin{enumerate}
+    \item \textbf{IxG 量化真实贡献}：通过 Input × Gradient 机制，量化边属性的真实边际贡献，而非仅反映梯度强度。
+
+    \item \textbf{通道独立归一化}：消除不同模态连接的量纲差异，确保各通道的显著性分数具有可比性。
+
+    \item \textbf{对抗去偏增强可解释性}：通过 GRL 机制学习的混淆不变表征，使得显著性图反映的是与人口学无关的脑网络特征贡献。
+
+    \item \textbf{分模态可视化}：为每个关系通道独立生成连接图，支持对 SC 和 FC 的认知贡献进行差异分析。
+\end{enumerate}
+
+该方法为理解深度学习模型如何利用多模态脑网络信息预测认知功能提供了更加精细和生物学合理的解释框架。
+
+\newpage
+
+\section{评估指标}
+
+模型采用多种评估指标全面衡量预测性能。
+
+\subsection{均方根误差（RMSE）}
+
+RMSE是最常用的回归评估指标，对大误差给予更高权重：
+
+\begin{equation}
+\text{RMSE} = \sqrt{ \frac{1}{N} \sum_{i=1}^{N} (y_i - \hat{y}_i)^2 }
+\end{equation}
+
+扩展形式：
+\begin{equation}
+\text{RMSE} = \sqrt{ \text{MSE} } = \sqrt{ \frac{1}{N} \sum_{i=1}^{N} (y_i - \hat{y}_i)^2 }
+\end{equation}
+
+RMSE的单位与目标变量相同，值越小表示预测精度越高。
+
+\subsection{平均绝对误差（MAE）}
+
+MAE对所有误差给予同等权重，对异常值更加鲁棒：
+
+\begin{equation}
+\text{MAE} = \frac{1}{N} \sum_{i=1}^{N} | y_i - \hat{y}_i |
+\end{equation}
+
+MAE对大误差的惩罚小于RMSE，当存在异常值时MAE通常更稳定。
+
+\subsection{决定系数（$R^2$）}
+
+$R^2$ 衡量模型对数据变异性的解释程度：
+
+\begin{equation}
+R^2 = 1 - \frac{\sum_{i=1}^{N} (y_i - \hat{y}_i)^2}{\sum_{i=1}^{N} (y_i - \bar{y})^2} = 1 - \frac{\text{SS}_{\text{res}}}{\text{SS}_{\text{tot}}}
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\text{SS}_{\text{res}} = \sum_{i=1}^{N} (y_i - \hat{y}_i)^2$：残差平方和
+    \item $\text{SS}_{\text{tot}} = \sum_{i=1}^{N} (y_i - \bar{y})^2$：总平方和
+    \item $\bar{y} = \frac{1}{N} \sum_{i=1}^{N} y_i$：目标均值
+\end{itemize}
+
+$R^2$ 的取值范围通常为$(-\infty, 1]$：
+\begin{itemize}
+    \item $R^2 = 1$：完美预测
+    \item $R^2 = 0$：模型预测效果与使用均值相同
+    \item $R^2 < 0$：模型预测效果差于均值预测
+\end{itemize}
+
+$R^2$ 越接近1，模型拟合效果越好。
+
+\subsection{Pearson相关系数}
+
+Pearson相关系数衡量预测值与真实值之间的线性相关性：
+
+\begin{equation}
+r = \frac{\sum_{i=1}^{N} (y_i - \bar{y})(\hat{y}_i - \overline{\hat{y}})}{\sqrt{\sum_{i=1}^{N} (y_i - \bar{y})^2} \cdot \sqrt{\sum_{i=1}^{N} (\hat{y}_i - \overline{\hat{y}})^2}}
+\end{equation}
+
+其中 $\overline{\hat{y}} = \frac{1}{N} \sum_{i=1}^{N} \hat{y}_i$。
+
+$r$ 的取值范围为 $[-1, 1]$：
+\begin{itemize}
+    \item $r > 0$：正相关
+    \item $r < 0$：负相关
+    \item $|r| = 1$：完全线性相关
+    \item $r = 0$：无线性相关
+\end{itemize}
+
+在认知预测任务中，通常报告 $|r|$ 或 $r^2$ 来评估预测效果。
+
+\subsection{多次评估与统计报告}
+
+由于随机初始化和Dropout的影响，模型性能存在方差。评估时通常进行多次重复测试（如11次），并报告均值和标准差：
+
+\begin{equation}
+\bar{\mu} = \frac{1}{T} \sum_{t=1}^{T} \mu^{(t)}, \quad \bar{\sigma} = \sqrt{ \frac{1}{T-1} \sum_{t=1}^{T} (\mu^{(t)} - \bar{\mu})^2 }
+\end{equation}
+
+最终报告格式：$\bar{\mu} \pm \bar{\sigma}$
+
+其中 $T$ 为重复次数，$\mu^{(t)}$ 为第 $t$ 次评估的指标值。
+
+\newpage
+
+\section{模型变体：LGUNet\_rela}
+
+LGUNet\_rela是LGUNet的关系感知变体，主要区别在于：
+
+\subsection{输入层差异}
+
+LGUNet\_rela使用relationGCN替代RGCN作为输入层：
+\begin{itemize}
+    \item relationGCN：标准多关系图卷积，无注意力机制
+    \item RGCN：带注意力机制的图卷积
+\end{itemize}
+
+relationGCN的参数量更少，计算效率更高。
+
+\subsection{边权重处理}
+
+LGUNet\_rela直接保存最后一层的边权重用于可解释性分析：
+\begin{equation}
+\mathbf{E}^{\text{saved}} = \mathbf{E}^{(D)}
+\end{equation}
+
+这些权重用于后续的脑网络可视化和生物学解释。
+
+\subsection{架构简化}
+
+LGUNet\_rela移除了解码器（上采样）部分，仅保留编码器用于特征提取和预测。解码器的移除简化了模型结构，减少了训练时间和过拟合风险。
+
+当前配置默认使用LGUNet\_rela进行主要实验。
+
+\newpage
+
+\section{超参数配置}
+
+表~\ref{tab:hyperparameters} 总结了模型的主要超参数配置。
+
+\begin{table}[htbp]
+\centering
+\caption{模型超参数配置}
+\label{tab:hyperparameters}
+\begin{tabular}{llc}
+\toprule
+参数名称 & 符号 & 默认值 \\
+\midrule
+训练轮数 & $T_{\text{epoch}}$ & 30-100 \\
+批次大小 & $B$ & 16 \\
+学习率 & $\eta$ & 0.01 \\
+L2正则化系数 & $\lambda$ & 0.001 \\
+输入维度 & $F_{\text{in}}$ & 246 \\
+隐藏层维度 & $F_{\text{hidden}}$ & 246 \\
+Dropout比率 & $p$ & 0.5 \\
+编码器深度 & $D$ & 3 \\
+池化比例 & $p_l$ & [0.5, 0.8, 0.5] \\
+边注意力负斜率 & $\delta$ & 0.2 \\
+PageRank阻尼系数 & $\alpha$ & 0.1 \\
+PageRank迭代次数 & $K$ & 10 \\
+\midrule
+\midrule
+\textbf{动态学习率参数（可选）} & \textbf{} & \textbf{} \\
+使能开关 & \texttt{use\_dynamic\_lr} & False \\
+最小学习率 & $\eta_{\text{min}}$ & $1\times10^{-6}$ \\
+预热轮数 & $T_{\text{warm}}$ & 5 \\
+Patience值 & $P$ & 10 \\
+衰减因子 & $\gamma_{\text{decay}}$ & 0.5 \\
+梯度下阈值 & $\tau_{\text{low}}$ & 0.01 \\
+梯度上阈值 & $\tau_{\text{high}}$ & 10.0 \\
+学习率增量因子 & $\gamma_{\text{inc}}$ & 1.05 \\
+最大增量次数 & $N_{\text{inc}}$ & 3 \\
+滑动窗口大小 & $W$ & 5 \\
+\midrule
+\midrule
+\textbf{早停机制参数（可选）} & \textbf{} & \textbf{} \\
+使能开关 & \texttt{use\_early\_stopping} & False \\
+Patience值 & $P$ & 15 \\
+最小改善阈值 & $\delta$ & $1\times10^{-4}$ \\
+最小训练轮数 & $T_{\text{min}}$ & 10 \\
+恢复最佳权重 & \texttt{restore\_best} & True \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{数据划分配置}
+
+典型数据集划分比例：
+\begin{itemize}
+    \item 训练集：70\%
+    \item 验证集：15\%
+    \item 测试集：15\%
+\end{itemize}
+
+采用随机划分，并通过随机种子保证可重复性（默认seed=42）。
+
+\newpage
+
+\section{技术实现细节}
+
+\subsection{框架依赖}
+
+模型基于PyTorch和PyTorch Geometric实现：
+
+\begin{itemize}
+    \item \textbf{PyTorch}：张量计算和自动微分
+    \item \textbf{PyTorch Geometric}：图神经网络算子
+    \item \textbf{torch\_scatter}：高效的散射操作
+    \item \textbf{scikit-learn}：数据处理和评估指标
+    \item \textbf{scipy}：统计分析
+\end{itemize}
+
+\subsection{设备配置}
+
+模型自动检测并使用GPU（CUDA）进行加速：
+\begin{verbatim}
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+\end{verbatim}
+
+当CUDA不可用时，模型在CPU上运行。
+
+\subsection{图数据加载与磁盘缓存优化}
+
+在处理大规模脑网络数据集（如HCP、HCD等）时，每个受试者的结构连接矩阵（SC）和功能连接矩阵（FC）通常以独立的CSV文件形式存储。当受试者数量众多（如数千人）时，传统的数据加载方式需要逐个解析这些CSV文件，导致显著的I/O瓶颈，严重影响多标签训练和跨脚本测试的执行效率。
+
+针对这一问题，本研究在数据加载模块中引入了基于PyTorch序列化机制的磁盘缓存策略，实现``一次读取、永久复用''的优化目标。
+
+\subsubsection{缓存机制设计原理}
+
+图神经网络中的核心数据结构——节点特征 $\mathbf{X}$、边索引 $\mathbf{A}$ 和边属性 $\mathbf{E}$——仅依赖于SC和FC矩阵的原始数据，与具体的认知功能标签（如CogFluidComp\_Unadj、PicSeq\_Acc等）无依赖关系。这一特性为缓存优化提供了理论可行性。
+
+缓存文件采用PyTorch原生的二进制序列化格式（.pt），文件名根据图谱类型和特征通道动态生成：
+
+\begin{equation}
+\text{cache\_filename} = \text{cached\_graphs\_}\{\text{atlas}\}\_\{\text{sc\_channels}\}\_\{\text{fc\_channel}\}.\text{pt}
+\end{equation}
+
+这种命名策略确保了不同图谱、不同特征配置下的缓存文件相互独立，避免配置混淆。
+
+\subsubsection{数据处理流程}
+
+改进后的数据加载流程分为三个阶段：
+
+\textbf{阶段一：缓存查询与加载。} 在每次数据加载调用时，系统首先检查对应的缓存文件是否存在。若存在，则通过 \texttt{torch.load} 直接将预处理的图结构加载至内存；否则，进入原始数据解析流程。
+
+\textbf{阶段二：图结构构建与缓存写入。} 对于未命中缓存的受试者，系统解析其SC和FC的CSV文件，构建节点特征和边属性。处理完成后，将包含所有受试者图结构的字典对象写入磁盘缓存：
+
+\begin{equation}
+\mathcal{C} = \left\{ (\mathbf{X}_i, \mathbf{A}_i, \mathbf{E}_i) \mid i \in \mathcal{S}_{\text{valid}} \right\}
+\end{equation}
+
+其中 $\mathcal{S}_{\text{valid}}$ 为所有有效受试者的集合。
+
+\textbf{阶段三：动态标签挂载。} 无论图数据来源于缓存还是新解析，系统在循环末尾统一进行标签分配：
+
+\begin{equation}
+\mathcal{D}_{\text{label}} = \left\{ (\mathcal{G}_i, y_i) \mid \mathcal{G}_i \in \mathcal{C}, y_i = \text{label}[i] \right\}
+\end{equation}
+
+这种设计使得同一套图结构可以灵活适配不同的认知标签任务。
+
+\subsubsection{多标签训练加速分析}
+
+在多标签训练场景中，该缓存机制带来的效率提升尤为显著。设标签集合为 $\mathcal{L} = \{l_1, l_2, \ldots, l_M\}$，受试者数量为 $N$，单个CSV解析耗时为 $t_{\text{csv}}$，缓存加载耗时为 $t_{\text{cache}}$（通常 $t_{\text{cache}} \ll t_{\text{csv}}$）。
+
+优化前的时间复杂度为：
+\begin{equation}
+T_{\text{before}} = M \cdot N \cdot t_{\text{csv}}
+\end{equation}
+
+优化后的时间复杂度为：
+\begin{equation}
+T_{\text{after}} = N \cdot t_{\text{csv}} + M \cdot (N \cdot t_{\text{cache}} + t_{\text{label}})
+\end{equation}
+
+其中 $t_{\text{label}}$ 为标签分配耗时。当 $M \geq 2$ 时，即可获得显著的时间收益；$M$ 越大，加速效果越明显。
+
+\subsubsection{内存安全性保证}
+
+每次调用 \texttt{torch.load} 都会在内存中实例化全新的PyTorch张量对象，不同任务之间的计算图相互独立。这一特性确保了在测试阶段通过 \texttt{g\_test.edge\_attr.requires\_grad = True} 注入的可解释性计算图不会污染训练状态，保证了模型解释结果的语义一致性。
+
+该优化策略在保持原有数据处理逻辑完整性的前提下，有效解决了大规模脑网络数据场景下的I/O瓶颈问题，为后续的多标签扩展和高效实验迭代奠定了基础。
+
+\subsection{数值精度}
+
+训练时使用双精度浮点数（float64）：
+\begin{verbatim}
+torch.set_default_dtype(torch.float64)
+\end{verbatim}
+
+这有助于提高回归任务的数值稳定性。
+
+\subsection{命令行参数配置}
+
+模型训练通过命令行参数进行配置，表~\ref{tab:cmd_params} 列出了主要的可配置参数。
+
+\begin{table}[htbp]
+\centering
+\caption{训练命令行参数配置}
+\label{tab:cmd_params}
+\begin{tabular}{llc}
+\toprule
+参数类别 & 参数名称 & 默认值 \\
+\midrule
+\midrule
+\textbf{数据集参数} & \texttt{--dataset} & HCD \\
+ & \texttt{--dataset\_name} & HCD \\
+ & \texttt{--use\_dataset\_cfg} & False \\
+ & \texttt{--atlas\_name} & bna246 \\
+ & \texttt{--sc\_kinds} & FA, fiber\_count \\
+ & \texttt{--fc\_kind} & pcc\_rest \\
+\midrule
+\textbf{模型参数} & \texttt{--input\_dimension} & 246 \\
+ & \texttt{--hidden\_dimension} & 246 \\
+ & \texttt{--output\_dimension} & 1 \\
+ & \texttt{--depth} & 3 \\
+ & \texttt{--dropout} & 0.5 \\
+ & \texttt{--pool\_ratio} & [0.5, 0.8, 0.5] \\
+\midrule
+\textbf{训练参数} & \texttt{--num\_epochs} & 30 \\
+ & \texttt{--batch} & 16 \\
+ & \texttt{--learning\_rate} & 0.01 \\
+ & \texttt{--l2\_penalty} & 0.001 \\
+ & \texttt{--seed} & 42 \\
+ & \texttt{--test\_repeat} & 11 \\
+\midrule
+\textbf{数据划分} & \texttt{--split\_ratio} & [0.7, 0.15, 0.15] \\
+ & \texttt{--label\_types} & CogFluidComp\_Unadj \\
+\midrule
+\textbf{标签标准化} & \texttt{--normalize\_labels} & True \\
+ & \texttt{--no\_normalize\_labels} & False \\
+\midrule
+\textbf{动态学习率} & \texttt{--use\_dynamic\_lr} & False \\
+ & \texttt{--lr\_patience} & 10 \\
+ & \texttt{--lr\_factor} & 0.5 \\
+ & \texttt{--min\_lr} & 1e-6 \\
+ & \texttt{--warmup\_epochs} & 5 \\
+\midrule
+\textbf{早停机制} & \texttt{--use\_early\_stopping} & False \\
+ & \texttt{--early\_stopping\_patience} & 15 \\
+ & \texttt{--early\_stopping\_min\_delta} & 1e-4 \\
+ & \texttt{--early\_stopping\_min\_epochs} & 10 \\
+ & \texttt{--early\_stopping\_restore\_best} & True \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+典型训练命令示例：
+
+\begin{verbatim}
+# 基础训练（使用标准化标签和MultiStepLR）
+python run.py --use_dataset_cfg \
+    --num_epochs 100 \
+    --dataset_name S1200 \
+    --atlas_name bna246 \
+    --sc_kinds FA fiber_length \
+    --fc_kind pcc_rest \
+    --label_types CogFluidComp_Unadj,CogEarlyComp_Unadj \
+    --learning_rate 0.01 \
+    --dropout 0.1 \
+    --depth 2
+
+# 使用动态学习率调度
+python run.py --use_dataset_cfg \
+    --num_epochs 100 \
+    --dataset_name S1200 \
+    --sc_kinds FA fiber_length \
+    --fc_kind pcc_rest \
+    --learning_rate 0.01 \
+    --use_dynamic_lr \
+    --lr_patience 10 \
+    --lr_factor 0.5 \
+    --min_lr 1e-6 \
+    --warmup_epochs 5
+
+# 使用早停机制
+python run.py --use_dataset_cfg \
+    --num_epochs 100 \
+    --dataset_name S1200 \
+    --sc_kinds FA fiber_length \
+    --fc_kind pcc_rest \
+    --learning_rate 0.01 \
+    --use_early_stopping \
+    --early_stopping_patience 20 \
+    --early_stopping_min_delta 1e-4 \
+    --early_stopping_min_epochs 15
+
+# 联合使用动态学习率和早停
+python run.py --use_dataset_cfg \
+    --num_epochs 100 \
+    --dataset_name S1200 \
+    --sc_kinds FA fiber_length \
+    --fc_kind pcc_rest \
+    --learning_rate 0.01 \
+    --use_dynamic_lr \
+    --use_early_stopping \
+    --lr_patience 10 \
+    --early_stopping_patience 25
+
+# 禁用标签标准化
+python run.py --use_dataset_cfg \
+    --num_epochs 100 \
+    --no_normalize_labels \
+    --learning_rate 0.0001
+\end{verbatim}
+
+\newpage
+
+\section{模型可解释性与可视化}
+
+本节详细介绍模型的可解释性数据获取方法与可视化实现，用于理解和分析模型对认知功能预测的决策依据。
+
+\subsection{可解释性方法概述}
+
+模型采用两种主要的可解释性方法：
+
+\begin{enumerate}
+    \item \textbf{梯度显著性图 (Saliency Map)}：通过反向传播计算输入边属性对预测结果的梯度
+    \item \textbf{生存权重 (Survival Weight)}：提取模型最后一层学习到的边权重，反映边的结构性重要性
+\end{enumerate}
+
+这两种方法分别从``数据驱动''和``结构学习''两个角度揭示模型的决策机制。
+
+\subsection{显著性图的计算原理}
+
+显著性图方法通过计算预测损失对输入边属性的梯度，量化每个边属性对最终预测的贡献程度。
+
+\subsubsection{梯度计算过程}
+
+给定训练好的模型 $f(\cdot)$ 和测试样本 $(\mathcal{G}, y)$，显著性图的计算过程如下：
+
+\textbf{步骤1：启用梯度计算}
+
+\begin{verbatim}
+g_test.edge_attr.requires_grad = True
+\end{verbatim}
+
+这允许PyTorch追踪对边属性的梯度计算。
+
+\textbf{步骤2：前向传播与损失计算}
+
+\begin{equation}
+\hat{y} = f(\mathcal{G}), \quad \mathcal{L}_{\text{saliency}} = \frac{1}{B} \sum_{i=1}^{B} | \hat{y}_i - y_i |
+\end{equation}
+
+其中 $\mathcal{L}_{\text{saliency}}$ 为预测值与真实值的绝对误差损失（用于保证梯度的稳定性）。
+
+\textbf{步骤3：反向传播}
+
+\begin{verbatim}
+loss.backward()
+\end{verbatim}
+
+执行反向传播，自动计算损失函数对所有可学习参数的梯度。
+
+\textbf{步骤4：提取显著性值}
+
+\begin{equation}
+S_{ij,r} = \left| \frac{\partial \mathcal{L}_{\text{saliency}}}{\partial \mathbf{E}_{ij,r}} \right|
+\end{equation}
+
+其中 $S_{ij,r}$ 表示从节点 $i$ 到节点 $j$、关系类型 $r$ 的边的显著性分数。
+
+显著性分数的绝对值越大，表明该边属性对预测结果的影响越显著。
+
+\textbf{步骤5：多关系聚合}
+
+由于每条边有3个关系通道的梯度，需要将其聚合为边的整体重要性：
+
+\begin{equation}
+S_{ij} = \frac{1}{R} \sum_{r=1}^{R} S_{ij,r}
+\end{equation}
+
+\subsection{生存权重的提取}
+
+生存权重来源于LGMVPool层中学习到的边属性，经过Sparsemax处理后保存在模型中。
+
+\begin{equation}
+\mathbf{E}^{\text{survival}} = \mathbf{E}^{(D)}_{\text{LGMVPool}}
+\end{equation}
+
+其中 $D$ 为编码器深度，$\mathbf{E}^{\text{survival}}$ 保存了最后一层池化后的边权重。
+
+这些权重反映了模型在图简化过程中学到的边结构重要性，可用于识别关键的脑区连接。
+
+\subsection{边索引的保存}
+
+为了支持后续可视化，需要保存每张图的边索引信息：
+
+\begin{equation}
+\mathbf{A}_{\text{idx}} = \text{edge\_index}
+\end{equation}
+
+边索引记录了每条边连接的两个节点的索引，是将一维边属性映射回二维邻接矩阵的关键信息。
+
+\subsection{数据存储格式}
+
+可解释性数据保存为NumPy的.npy格式，在训练结束时自动生成。保存策略采用与最佳验证模型同步的机制：每次验证损失改善时更新模型，当训练结束时自动在该模型上计算显著性图。
+
+保存时机与流程：
+
+\begin{enumerate}
+    \item \textbf{模型保存}：每轮验证后，若验证损失改善，保存模型至临时文件
+    \item \textbf{训练结束}：训练完成后，加载最佳验证模型
+    \item \textbf{显著性提取}：在验证集和测试集上分别提取显著性图
+    \item \textbf{结果保存}：输出显著性矩阵文件
+\end{enumerate}
+
+输出文件清单：
+
+\begin{itemize}
+    \item \textbf{saliency\_matrices\_val.npy}：验证集样本的显著性梯度矩阵（训练结束时生成）
+    \item \textbf{saliency\_matrices\_test.npy}：测试集样本的显著性梯度矩阵（训练结束时生成）
+\end{itemize}
+
+数据结构定义：
+
+\begin{verbatim}
+saliency_matrices_val: List[Array[N_nodes, N_nodes, R]]
+saliency_matrices_test: List[Array[N_nodes, N_nodes, R]]
+# N_nodes为脑区数（默认246），R=3为关系数（SC、FC_pos、FC_neg）
+\end{verbatim}
+
+所有数组存储为Python列表（dtype=object），每个元素对应一个样本的显著性矩阵。
+
+\subsection{显著性矩阵构建}
+
+将一维边属性向量还原为对称邻接矩阵的过程如下：
+
+\textbf{函数：build\_saliency\_matrix}
+
+\begin{verbatim}
+def build_saliency_matrix(edge_index, saliency_attr, num_nodes=None):
+    # 动态推断节点数
+    if num_nodes is None:
+        num_nodes = int(np.max(edge_index)) + 1
+    
+    # 初始化邻接矩阵
+    sal_mat = np.zeros((num_nodes, num_nodes))
+    
+    # 多关系梯度求平均
+    if len(saliency_attr.shape) > 1:
+        importance = np.mean(saliency_attr, axis=1)
+    else:
+        importance = saliency_attr
+
+    # 填充矩阵（保证对称性）
+    for k in range(edge_index.shape[1]):
+        i, j = int(edge_index[0, k]), int(edge_index[1, k])
+        sal_mat[i, j] = importance[k]
+        sal_mat[j, i] = importance[k]  # 对称赋值
+        
+    return sal_mat
+\end{verbatim}
+
+数学表达：
+
+\begin{equation}
+\mathbf{S}^{\text{full}}_{ij} = \begin{cases}
+\frac{1}{R} \sum_{r=1}^{R} S_{ij,r} & \text{if } (i,j) \in \mathcal{E} \\
+0 & \text{otherwise}
+\end{cases}
+\end{equation}
+
+且满足 $\mathbf{S}^{\text{full}}_{ij} = \mathbf{S}^{\text{full}}_{ji}$（对称性）。
+
+\subsection{可视化实现}
+
+compute\_graphs.py 模块提供了完整的可视化流程，涵盖热力图和脑3D连接图两种形式。
+
+\subsubsection{显著性热力图}
+
+热力图直观展示所有脑区对之间的连接重要性：
+
+\begin{verbatim}
+plt.figure(figsize=(10, 8))
+sns.heatmap(mean_saliency, cmap="Reds", square=True)
+plt.title(f"Average Saliency Map: {label_name}")
+plt.tight_layout()
+plt.savefig(f"saliency_heatmap_{label_name}.pdf", dpi=300)
+\end{verbatim}
+
+\textbf{配色方案}：使用 ``Reds'' 配色，显著性越高的区域颜色越深，便于识别关键连接。
+
+\textbf{输出格式}：PDF矢量图，保证高分辨率打印质量。
+
+\subsubsection{大脑3D连接图}
+
+利用nilearn库在脑模板上绘制3D连接图：
+
+\begin{verbatim}
+# 提取Top 2%显著性边
+non_zero_saliency = mean_saliency[mean_saliency > 0]
+threshold = np.percentile(non_zero_saliency, 98)
+
+# 绘制3D连接图
+fig = plot_connectome(mean_saliency, coords, 
+                      edge_threshold=threshold,
+                      title=f"Top Saliency Connectome: {label_name}",
+                      node_size=20, edge_kwargs={'lw': 2})
+\end{verbatim}
+
+\textbf{节点坐标获取}：
+
+\begin{equation}
+\mathbf{C} = \left\{ (x_i, y_i, z_i) \mid i = 1, 2, \ldots, N_{\text{nodes}} \right\}
+\end{equation}
+
+其中 $\mathbf{C}$ 为脑区图谱中每个ROI的三维MNI坐标。
+
+\textbf{边阈值过滤}：
+
+\begin{equation}
+\mathcal{E}_{\text{top}} = \left\{ (i,j) \mid \mathbf{S}^{\text{full}}_{ij} > \tau \right\}
+\end{equation}
+
+其中 $\tau = P_{98}(\mathbf{S}^{\text{full}})$ 为第98百分位数阈值，仅展示重要性最高的前2\%边。
+
+\textbf{安全检查}：当坐标数量与邻接矩阵维度不匹配时，自动跳过3D脑图生成，避免错误。
+
+\subsubsection{其他可视化图表}
+
+\textbf{损失曲线}：绘制训练和验证损失随epoch的变化趋势
+
+\textbf{评估指标柱状图}：展示不同认知任务的RMSE和$R^2$分布
+
+\begin{verbatim}
+plt.bar(x, mean_rmse, yerr=std_rmse, capsize=4)
+plt.xlabel("Cognitive Label")
+plt.ylabel("RMSE")
+plt.savefig("test_rmse_bar.png", dpi=300)
+\end{verbatim}
+
+\subsection{可视化脚本配置参数}
+
+compute\_graphs.py 支持的命令行参数：
+
+\begin{itemize}
+    \item \textbf{--combo\_dir}：训练结果目录路径（必需）
+    \item \textbf{--atlas}：脑区图谱名称，用于加载坐标文件（必需）
+    \item \textbf{--plots\_dir}：输出图表目录，默认在combo\_dir/plots
+    \item \textbf{--label}：指定处理的认知标签，多个用逗号分隔，为空则处理全部
+\end{itemize}
+
+使用示例：
+
+\begin{verbatim}
+python compute_graphs.py \
+    --combo_dir ./results/20260330_154419/S1200/.../seed_42 \
+    --atlas bna246 \
+    --label CogFluidComp_Unadj
+\end{verbatim}
+
+\subsection{坐标文件要求}
+
+3D大脑连接图需要预计算的脑区坐标文件，格式为NumPy数组：
+
+\begin{verbatim}
+coords = np.load(f'/path/to/coords/{atlas_name}.npy')
+# 形状: (N_nodes, 3) - 每行为一个脑区的 [x, y, z] 坐标
+\end{verbatim}
+
+支持的图谱包括：AAL116 (116节点)、BNA246 (246节点)、Glasser360 (360节点)等。
+
+\subsection{输出文件汇总}
+
+完整的可视化输出包括：
+
+\begin{table}[htbp]
+\centering
+\caption{可视化输出文件清单}
+\label{tab:output_files}
+\begin{tabular}{llc}
+\toprule
+文件名 & 描述 & 格式 \\
+\midrule
+saliency\_heatmap\_\{label\}.pdf & 平均显著性热力图 & PDF \\
+saliency\_connectome\_\{label\}.pdf & Top显著性脑3D连接图 & PDF \\
+val\_loss\_curves.png & 验证损失曲线 & PNG \\
+test\_rmse\_bar.png & 测试RMSE柱状图 & PNG \\
+test\_r2\_bar.png & 测试R$^2$柱状图 & PNG \\
+summary\_by\_label.csv & 各标签评估指标汇总 & CSV \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{可解释性分析流程总结}
+
+完整的模型可解释性分析流程如下：
+
+\begin{enumerate}
+    \item \textbf{训练阶段}：训练模型并保存最佳验证模型
+    \item \textbf{显著性提取}：使用explain\_model函数提取梯度显著性图
+    \item \textbf{权重保存}：保存最后一层的边权重（生存权重）
+    \item \textbf{矩阵构建}：将边向量还原为对称邻接矩阵
+    \item \textbf{平均聚合}：对所有测试样本的显著性矩阵求平均
+    \item \textbf{可视化生成}：生成热力图和3D脑连接图
+    \item \textbf{结果分析}：识别对认知预测最重要的脑区连接
+\end{enumerate}
+
+该流程实现了从模型预测到生物学解释的完整闭环，为理解深度学习模型如何利用脑连接预测认知功能提供了直观依据。
+
+\newpage
+
+\section{总结}
+
+本方法学文档详细介绍了LGUNet及其变体模型的设计原理和技术细节。核心贡献包括：
+
+\begin{enumerate}
+    \item \textbf{多关系图表示}：利用SC和FC构建多通道边属性图，编码丰富的脑区连接信息
+    \item \textbf{层级图卷积}：通过堆叠RGCN/relationGCN层提取多尺度图特征
+    \item \textbf{LGMVPool池化}：创新性地融合度评分、PageRank评分和结构学习，实现自适应的图结构简化
+    \item \textbf{Sparsemax注意力}：在边权重学习中引入稀疏注意力机制，增强模型的可解释性
+    \item \textbf{多指标评估}：采用RMSE、MAE、R$^2$和Pearson相关系数全面评估模型性能
+\end{enumerate}
+
+该框架为脑认知功能预测研究提供了一个强大且可解释的深度学习工具。
+
+\newpage
+
+\section{附录：关键公式汇总}
+
+\subsection{核心传播公式}
+
+\textbf{RGCN层：}
+\begin{equation}
+\mathbf{x}'_i = \sigma\left( \sum_{r=1}^{R} \sum_{j \in \mathcal{N}_i^r} \alpha_{ij,r} \cdot \mathbf{E}_{ij,r}^{\text{norm}} \cdot \mathbf{x}_j \cdot \mathbf{W}_r + \mathbf{b} \right)
+\end{equation}
+
+\textbf{LGMVPool评分：}
+\begin{equation}
+s_i = \frac{1}{2} \left( \sigma(\alpha \cdot \log(d_i)) + \sigma(\beta \cdot \text{PR}_i) \right)
+\end{equation}
+
+\textbf{边结构学习：}
+\begin{equation}
+w_{ij,r}^{\text{sparse}} = \text{Sparsemax}\left( \lambda \cdot \mathbf{E}'_{ij,r} + \text{LeakyReLU}(\mathbf{a}^{\top}[\mathbf{x}'_i \parallel \mathbf{x}'_j]) \right)
+\end{equation}
+
+\subsection{损失与评估公式}
+
+\textbf{Smooth L1 Loss：}
+\begin{equation}
+\mathcal{L}_{\text{SmoothL1}}(x) = \begin{cases} 0.5 x^2 & |x| < 1 \\ |x| - 0.5 & \text{otherwise} \end{cases}
+\end{equation}
+
+\textbf{RMSE：}
+\begin{equation}
+\text{RMSE} = \sqrt{ \frac{1}{N} \sum_{i=1}^{N} (y_i - \hat{y}_i)^2 }
+\end{equation}
+
+\textbf{R$^2$：}
+\begin{equation}
+R^2 = 1 - \frac{\sum (y_i - \hat{y}_i)^2}{\sum (y_i - \bar{y})^2}
+\end{equation}
+
+\textbf{Pearson相关系数：}
+\begin{equation}
+r = \frac{\sum (y_i - \bar{y})(\hat{y}_i - \overline{\hat{y}})}{\sqrt{\sum (y_i - \bar{y})^2} \cdot \sqrt{\sum (\hat{y}_i - \overline{\hat{y}})^2}}
+\end{equation}
