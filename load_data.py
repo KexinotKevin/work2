@@ -182,6 +182,7 @@ def load_data(
     graph_list = []
     dt = pd.read_csv(labelfile)
     lb_map = dt[labeltype].values
+    skipped_bad_label = 0
     subjlist_set = set([str(s) for s in subjlist if str(s)])
 
     # 预处理年龄与性别映射（用于 GRL 对抗训练）
@@ -203,7 +204,9 @@ def load_data(
         for k in range(dt.shape[0]):
             subj = str(dt[subject_col][k])
             if subj in subjlist_set:
-                subj_for_file = subj.replace("NDAR_", "NDAR") if subj.startswith("NDAR_") else subj
+                # ABCD 等数据：磁盘目录与分数表中的 src_subject_id 一致（如 NDAR_INV...），
+                # 不要去掉 NDAR_ 后的下划线，否则路径指向不存在的 NDARINV... 目录。
+                subj_for_file = subj
 
                 # 读取矩阵的原始逻辑
                 if use_cfg_layout:
@@ -239,7 +242,13 @@ def load_data(
                     sc_mats = [sc_mat]
                     fc_mat = load_connectivity_matrix(osp.join(netDir, fc_netname, matname), isheader=Isheader)
 
-                if fc_mat.shape[0] != fc_mat.shape[1]: continue
+                if fc_mat.shape[0] != fc_mat.shape[1]:
+                    continue
+                n = fc_mat.shape[0]
+                if any(sm.shape != (n, n) for sm in sc_mats):
+                    continue
+                if raw_mats_list and n != raw_mats_list[0]['fc_mat'].shape[0]:
+                    continue
                 raw_mats_list.append({'subj': subj, 'sc_mats': sc_mats, 'fc_mat': fc_mat})
 
         # --- 阶段 2：计算组水平的变异系数阈值掩码 (p=0.75) ---
@@ -321,11 +330,24 @@ def load_data(
     for k in range(dt.shape[0]):
         subj = str(dt[subject_col][k])
         if subj in subjlist_set and subj in graph_dict:
+            raw_lb = lb_map[k]
+            if pd.isna(raw_lb):
+                skipped_bad_label += 1
+                continue
+            try:
+                flb = float(raw_lb)
+            except (TypeError, ValueError):
+                skipped_bad_label += 1
+                continue
+            if not np.isfinite(flb):
+                skipped_bad_label += 1
+                continue
+
             g_data = graph_dict[subj]
             g_data.age = torch.tensor([age_map.get(subj, 0.0)], dtype=g_data.x.dtype)
             g_data.gender = torch.tensor([gender_map.get(subj, 0.0)], dtype=g_data.x.dtype)
 
-            lb = torch.tensor(lb_map[k], dtype=g_data.x.dtype, device=g_data.x.device)
+            lb = torch.tensor(flb, dtype=g_data.x.dtype, device=g_data.x.device)
             if ifBucket:
                 graph_list.append((g_data, torch.Tensor(label_bucketization(lb))))
             else:
@@ -338,6 +360,11 @@ def load_data(
         torch.save(graph_dict, cache_path)
     # =========================================================================
 
+    if skipped_bad_label:
+        print(
+            f">>> Skipped {skipped_bad_label} subjects with missing or non-finite "
+            f"label ({labeltype!r})."
+        )
     print("dataset size: {} subjects".format(len(graph_list)))
     if len(graph_list) == 0:
         hint = (

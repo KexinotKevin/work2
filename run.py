@@ -272,7 +272,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
 # checkpoint_path: 若指定则从该路径加载权重；否则从 label_output_dir/best_validation.pth 加载（训练流程）
 def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale=100.0, checkpoint_path=None):
     ckpt = checkpoint_path if checkpoint_path is not None else os.path.join(label_output_dir, "best_validation.pth")
-    model_t = torch.load(ckpt, weights_only=False).to(device)
+    model_t = torch.load(ckpt, weights_only=False, map_location=device).to(device)
     model_t.eval()
 
     from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
@@ -299,13 +299,31 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
                 lb_t.append(lb_test.cpu().numpy())
                 lb_p.append(lb_pred_real.cpu().numpy()) # 記錄還原後的值
             
-            lb_test = np.array(lb_t).flatten()
-            lb_pred = np.array(lb_p).flatten()
-            
-            total_rmse.append(root_mean_squared_error(lb_test, lb_pred))
-            total_mae.append(mean_absolute_error(lb_test, lb_pred))
-            total_r2.append(r2_score(lb_test, lb_pred))
-            total_p.append(pearsonr(lb_test, lb_pred)[0])
+            lb_test = np.asarray(lb_t).flatten()
+            lb_pred = np.asarray(lb_p).flatten()
+            if lb_test.shape != lb_pred.shape:
+                raise ValueError(
+                    f"Label/prediction length mismatch: {lb_test.shape} vs {lb_pred.shape}"
+                )
+            finite_mask = np.isfinite(lb_test) & np.isfinite(lb_pred)
+            n_bad = int(finite_mask.size - np.count_nonzero(finite_mask))
+            if n_bad:
+                print(
+                    f"Warning: excluding {n_bad} samples with non-finite label or prediction "
+                    "from metric computation."
+                )
+            if not np.any(finite_mask):
+                raise ValueError(
+                    "No finite (label, prediction) pairs for evaluation. "
+                    "Check for NaN labels in the CSV or NaN model outputs."
+                )
+            yt = lb_test[finite_mask]
+            yp = lb_pred[finite_mask]
+
+            total_rmse.append(root_mean_squared_error(yt, yp))
+            total_mae.append(mean_absolute_error(yt, yp))
+            total_r2.append(r2_score(yt, yp))
+            total_p.append(pearsonr(yt, yp)[0])
 
     # 打印到終端
     print(f"Test Results over {args.test_repeat} repeats:")
@@ -414,7 +432,7 @@ def parse_args():
     parser.add_argument("--hidden_dimension", type=int, default=216)
     parser.add_argument("--output_dimension", type=int, default=1)
     parser.add_argument("--depth", type=int, default=3)
-    parser.add_argument("--dropout", type=float, default=0.5)
+    parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--pool_ratio", type=float, nargs="+", default=[0.8, 0.8, 0.8])
 
     parser.add_argument("--split_ratio", type=float, nargs=3, default=[0.7, 0.15, 0.15])

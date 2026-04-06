@@ -4,8 +4,26 @@ import os
 import json
 import numpy as np
 from dataset import dataset
-from run import evaluate
+from run import evaluate, sanitize_name
 from torch_geometric.loader import DataLoader
+
+
+def resolve_source_label_column(model_path, meta, fallback_label):
+    """训练时标签列名（与 checkpoint 旁 label_name.txt 一致）；跨数据集测试时不能与目标集 --label_type 混用。"""
+    label_dir = os.path.dirname(model_path)
+    p = os.path.join(label_dir, "label_name.txt")
+    if os.path.isfile(p):
+        with open(p, "r", encoding="utf-8") as f:
+            line = f.readline().strip()
+            if line:
+                return line
+    base = os.path.basename(label_dir)
+    if base.startswith("label_"):
+        slug = base[len("label_") :]
+        for lab in meta.get("labels") or []:
+            if sanitize_name(lab) == slug:
+                return lab
+    return fallback_label
 
 def main():
     parser = argparse.ArgumentParser(description="Standalone Test Script")
@@ -50,12 +68,16 @@ def main():
             raise FileNotFoundError(f"Cannot find run_meta.json at {meta_path}. Required for label de-normalization.")
         with open(meta_path, 'r', encoding='utf-8') as f:
             meta = json.load(f)
-        
-        print(">>> Restoring Source Training Dataset to compute normalization params...")
+
+        src_label_col = resolve_source_label_column(args.model_path, meta, args.label_type)
+        print(
+            ">>> Restoring Source Training Dataset to compute normalization params "
+            f"(source label column: {src_label_col})..."
+        )
         torch.manual_seed(meta.get("seed", 42))
         src_dt = dataset(
             dsType=meta.get("dataset", "HCD"),
-            labelType=args.label_type,
+            labelType=src_label_col,
             use_dataset_cfg=meta.get("use_dataset_cfg", True),
             dataset_name=meta.get("dataset_name", "S1200"),
             atlas_name=meta.get("atlas_name", "bna246"),
@@ -63,9 +85,9 @@ def main():
             fc_kind=meta.get("fc_kind", "pcc_rest")
         )
         src_dt.setsubset(
-            labelType=args.label_type, 
-            labeldim=246, 
-            split_ratio=meta.get("split_ratio", [0.7, 0.15, 0.15]), 
+            labelType=src_label_col,
+            labeldim=246,
+            split_ratio=meta.get("split_ratio", [0.7, 0.15, 0.15]),
             create_val=True
         )
         train_labels = torch.tensor([data[1] for data in src_dt.train_dataset], dtype=torch.float64)

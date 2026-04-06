@@ -20,23 +20,43 @@ conda activate gnn_work2
 # --min_lr: 最小学习率（默认1e-6）
 # --warmup_epochs: 预热epoch数（默认5）
 
+# 目前最好的实验参数配置
+# python run.py --use_dataset_cfg \
+#     --num_epochs 200 \
+#     --dataset_name S1200 \
+#     --atlas_name schaefer200_S1 \
+#     --sc_kinds FA fiber_count \
+#     --fc_kind pcc_rest \
+#     --label_types 'CogFluidComp_Unadj' \
+#     --output_root ./debug_results/debug_final_restore \
+#     --depth 2 \
+#     --input_dimension 300 \
+#     --hidden_dimension 64 \
+#     --learning_rate 0.0005 \
+#     --dropout 0.5 \
+#     --l2_penalty 0.005 \
+#     --use_early_stopping
+
 # HCD .mat格式测试
 python run.py --use_dataset_cfg \
-    --num_epochs 2 \
+    --num_epochs 100 \
     --dataset_name HCD \
     --atlas_name bna246 \
     --sc_kinds fiber_count \
     --fc_kind pcc_rest \
-    --label_types 'nih_fluidcogcomp_unadjusted' \
-    --output_root ./debug_results/hcd_mat_test \
+    --label_types 'nih_fluidcogcomp_unadjusted','nih_crycogcomp_unadjusted','nih_eccogcomp_unadjusted','nih_totalcogcomp_unadjusted' \
+    --output_root ./results/hcd_all \
     --depth 2 \
     --input_dimension 300 \
-    --hidden_dimension 32 \
-    --batch 8 \
-    --learning_rate 0.001 \
-    --dropout 0.5 \
-    --l2_penalty 0.01 \
-    --use_early_stopping
+    --hidden_dimension 64 \
+    --learning_rate 0.005 \
+    --l2_penalty 0.005 \
+    --use_early_stopping \
+    --use_dynamic_lr \
+    --lr_patience 10 \
+    --lr_factor 0.5 \
+    --min_lr 1e-6 \
+    --warmup_epochs 5
 
 # python run.py --use_dataset_cfg \
 #     --num_epochs 50 \
