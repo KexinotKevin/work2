@@ -9,3 +9,4 @@ old_*
 *plots*
 *.tex
 *gitignore*
+*.csv

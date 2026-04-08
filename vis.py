@@ -167,30 +167,35 @@ def plot_saliency_heatmaps(saliency_matrices, out_dir, label_name, sc_kinds=None
     mean_saliency = np.mean(saliency_matrices, axis=0)
     num_relations = mean_saliency.shape[-1] if len(mean_saliency.shape) == 3 else 1
     
-    if num_relations < 4:
-        raise ValueError(f"Expected at least 4 relations, got {num_relations}")
+    if num_relations < 3:
+        raise ValueError(f"Expected at least 3 relations, got {num_relations}")
     
     if sc_kinds is None:
-        sc_kinds = ['FA', 'fiber_count']
+        sc_kinds = ['fiber_count']
     if fc_kind is None:
         fc_kind = 'pcc_rest'
     
-    rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
-                 sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
-                 f'{fc_kind}_pos',
-                 f'{fc_kind}_neg']
+    # 根据 num_relations 动态设置关系名称和布局
+    if num_relations == 3:
+        rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
+                     sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
+                     f'{fc_kind}_pos']
+        rows, cols = 1, 3
+    else:  # num_relations >= 4
+        rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
+                     sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
+                     f'{fc_kind}_pos',
+                     f'{fc_kind}_neg']
+        rows, cols = 2, 2
     
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 6, rows * 5))
     fig.suptitle(f'Saliency Heatmaps: {label_name}', fontsize=16, fontweight='bold', y=1.02)
     
-    for r in range(4):
-        row = r // 2
-        col = r % 2
-        
+    for r in range(num_relations):
         rel_saliency = mean_saliency[:, :, r] if num_relations > 1 else mean_saliency
-        rel_name = rel_names[r]
-        
-        ax = axes[row, col]
+        rel_name = rel_names[r] if r < len(rel_names) else f'Relation_{r}'
+        # plt.subplots(1, n) returns a 1D axes array; (n, m) returns 2D — ravel matches row-major r
+        ax = np.ravel(axes)[r]
         non_zero_mask = (rel_saliency != 0)
         if non_zero_mask.sum() == 0:
             ax.text(0.5, 0.5, f'{rel_name}\n(All zeros)', ha='center', va='center', fontsize=12)
@@ -299,18 +304,24 @@ def plot_saliency_connectomes(saliency_matrices, coords, out_dir, label_name, sc
     mean_saliency = np.mean(saliency_matrices, axis=0)
     num_relations = mean_saliency.shape[-1] if len(mean_saliency.shape) == 3 else 1
     
-    if num_relations < 4:
-        raise ValueError(f"Expected at least 4 relations, got {num_relations}")
+    if num_relations < 3:
+        raise ValueError(f"Expected at least 3 relations, got {num_relations}")
     
     if sc_kinds is None:
         sc_kinds = ['FA', 'fiber_count']
     if fc_kind is None:
         fc_kind = 'pcc_rest'
     
-    rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
-                 sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
-                 f'{fc_kind}_pos',
-                 f'{fc_kind}_neg']
+    # 根据 num_relations 动态设置关系名称
+    if num_relations == 3:
+        rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
+                     sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
+                     f'{fc_kind}_pos']
+    else:  # num_relations >= 4
+        rel_names = [sc_kinds[0] if len(sc_kinds) > 0 else f'Relation_0',
+                     sc_kinds[1] if len(sc_kinds) > 1 else f'Relation_1',
+                     f'{fc_kind}_pos',
+                     f'{fc_kind}_neg']
     
     true_out_dir = os.path.join(out_dir, label_name)
     os.makedirs(true_out_dir, exist_ok=True)
@@ -318,9 +329,9 @@ def plot_saliency_connectomes(saliency_matrices, coords, out_dir, label_name, sc
     # 识别皮层节点（自动检测阈值）
     cortical_mask = _get_cortical_mask(coords)
     
-    for r in range(4):
+    for r in range(num_relations):
         rel_saliency = mean_saliency[:, :, r] if num_relations > 1 else mean_saliency
-        rel_name = rel_names[r]
+        rel_name = rel_names[r] if r < len(rel_names) else f'Relation_{r}'
         
         # 【核心修改】对皮层和非皮层区域分别归一化
         if cortical_mask is not None:

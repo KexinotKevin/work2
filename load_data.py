@@ -135,6 +135,7 @@ def load_data(
     output_dir=None,
     matDir=None,
     use_mat_format=False,
+    cons_thresh=0.75,
 ):
     def process_age(val):
         """处理异质性年龄格式：S1200区间型、ABCD整型、HCD连续型"""
@@ -184,7 +185,10 @@ def load_data(
     sc_channel_count = len(sc_netnames)
     graph_list = []
     dt = pd.read_csv(labelfile)
-    lb_map = dt[labeltype].values
+    if labeltype not in dt.columns:
+        raise KeyError(f"label column `{labeltype}` not in {labelfile}; columns={list(dt.columns)}")
+    # CSV 中认知分数常为字符串/object，直接 torch.tensor 会报 invalid data type 'str'
+    lb_map = pd.to_numeric(dt[labeltype], errors="coerce").to_numpy(dtype=np.float64)
     subjlist_set = set([str(s) for s in subjlist if str(s)])
 
     # 预处理年龄与性别映射（用于 GRL 对抗训练）
@@ -326,11 +330,14 @@ def load_data(
     for k in range(dt.shape[0]):
         subj = str(dt[subject_col][k])
         if subj in subjlist_set and subj in graph_dict:
+            lb_val = lb_map[k]
+            if np.isnan(lb_val):
+                continue
             g_data = graph_dict[subj]
             g_data.age = torch.tensor([age_map.get(subj, 0.0)], dtype=g_data.x.dtype)
             g_data.gender = torch.tensor([gender_map.get(subj, 0.0)], dtype=g_data.x.dtype)
 
-            lb = torch.tensor(lb_map[k], dtype=g_data.x.dtype, device=g_data.x.device)
+            lb = torch.tensor(lb_val, dtype=g_data.x.dtype, device=g_data.x.device)
             if ifBucket:
                 graph_list.append((g_data, torch.Tensor(label_bucketization(lb))))
             else:

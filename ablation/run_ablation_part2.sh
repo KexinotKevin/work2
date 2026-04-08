@@ -2,11 +2,11 @@
 set -e
 
 BASE_ARGS="--use_dataset_cfg \
-    --dataset_name S1200 \
-    --atlas_name schaefer200_S1 \
-    --sc_kinds FA fiber_count \
+    --dataset_name HCD \
+    --atlas_name bna246 \
+    --sc_kinds fiber_count \
     --fc_kind pcc_rest \
-    --label_types CogFluidComp_Unadj,CogEarlyComp_Unadj,CogTotalComp_Unadj,CogCrystalComp_Unadj \
+    --label_types nih_fluidcogcomp_unadjusted,nih_crycogcomp_unadjusted,nih_totalcogcomp_unadjusted,nih_eccogcomp_unadjusted \
     --num_epochs 100 \
     --depth 2 \
     --test_repeat 5 \
@@ -21,7 +21,7 @@ echo "==========================================="
 echo " Starting Ablation Part 2: Threshold & Pooling"
 echo "==========================================="
 NOW=$(date +"%Y%m%d_%H%M%S")
-BASE_OUT="/public/home/baitianyu/kexin/projects/work2/results/ablation"
+BASE_OUT="/public/home/baitianyu/kexin/projects/work2/ablation_results/ablation_hcd"
 # ----- 实验组A：Consistency Threshold 影响 -----
 # (注：0.75 为 Ours 默认设定，上一个脚本已跑过，这里补齐 0.25, 0.5, 1.0)
 echo ">>> Running A-1: Consistency Threshold = 0.25"
@@ -45,5 +45,5 @@ echo "==========================================="
 echo "   Training Complete. Generating Tables..."
 echo "==========================================="
 
-cd /public/home/baitianyu/kexin/projects/work2/ablation
-python generate_table_part2.py $NOW
+# cd /public/home/baitianyu/kexin/projects/work2/ablation
+# python generate_table_part2.py $NOW

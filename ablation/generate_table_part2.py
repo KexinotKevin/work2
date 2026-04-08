@@ -2,93 +2,248 @@
 """
 生成消融实验 Part 2（一致性阈值和池化策略）的汇总表格
 
-用法: python generate_table_part2.py
+用法: python generate_table_part2.py --exp_dir <实验根目录>
 
-输出: 打印 LaTeX 表格格式的结果
+示例: 
+  python generate_table_part2.py --exp_dir results/ablation/20260407_000752
+  python generate_table_part2.py --exp_dir results/ablation/20260407_000752 --ours_exp results/hcd_all/20260406_122112/HCD/atlas_bna246__sc_fiber_count__fc_pcc_rest/split_70_15_15/seed_42
+
+输出: 
+  - ablation_tables/ablation_metrics_thr_pool_<timestamp>.csv: CSV格式表格
+  - ablation_tables/ablation_metrics_thr_pool_<timestamp>.tex: LaTeX格式表格
 """
 
 import os
 import sys
+import glob
 import pandas as pd
 import numpy as np
+import argparse
+import time
+
+def concordance_correlation_coefficient(y_true, y_pred):
+    """
+    计算一致性相关系数（CCC, Concordance Correlation Coefficient）。
+    CCC = 2 * cov(y_true, y_pred) / (var(y_true) + var(y_pred) + (mean(y_true) - mean(y_pred))^2)
+    :param y_true: 真实标签，NumPy array
+    :param y_pred: 预测标签，NumPy array
+    :return: CCC值
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+    
+    mean_t = np.mean(y_true)
+    mean_p = np.mean(y_pred)
+    var_t = np.var(y_true)
+    var_p = np.var(y_pred)
+    
+    cov = np.mean((y_true - mean_t) * (y_pred - mean_p))
+    
+    numerator = 2 * cov
+    denominator = var_t + var_p + (mean_t - mean_p) ** 2
+    
+    if denominator == 0:
+        return np.nan
+        
+    return numerator / denominator
 
 def load_experiment_results(exp_path):
-    """从实验结果路径加载 test.csv 数据"""
-    # 获取脚本所在目录的父目录（项目根目录）
+    """从实验结果路径加载 test.csv 数据，支持旧结构和新的嵌套结构"""
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(script_dir)
-    
-    # 构建完整路径
     exp_full_path = os.path.normpath(os.path.join(project_root, exp_path))
     
-    # 查找 label 目录（直接在 exp_full_path 下）
-    label_dirs = [d for d in os.listdir(exp_full_path) if d.startswith("label_")] if os.path.exists(exp_full_path) else []
+    if not os.path.exists(exp_full_path):
+        return []
+    
+    # 使用 glob 递归查找所有 label_* 目录下的 test.csv
+    csv_files = glob.glob(os.path.join(exp_full_path, '**', 'label_*', 'test.csv'), recursive=True)
     
     results = []
-    for label_dir in label_dirs:
-        test_csv = os.path.join(exp_full_path, label_dir, "test.csv")
-        if os.path.exists(test_csv):
-            df = pd.read_csv(test_csv)
-            results.append({
-                'label': label_dir.replace("label_", ""),
-                'rmse_mean': df['repeat_rmse'].mean(),
-                'rmse_std': df['repeat_rmse'].std(),
-                'mae_mean': df['repeat_mae'].mean(),
-                'mae_std': df['repeat_mae'].std(),
-                'r2_mean': df['repeat_r2'].mean(),
-                'r2_std': df['repeat_r2'].std(),
-                'pearson_mean': df['pearson_corr'].mean(),
-                'pearson_std': df['pearson_corr'].std()
-            })
+    for test_csv in csv_files:
+        label_dir = os.path.dirname(test_csv)
+        df = pd.read_csv(test_csv)
+        results.append({
+            'label': os.path.basename(label_dir).replace("label_", ""),
+            'rmse': df['repeat_rmse'].mean(),
+            'mae': df['repeat_mae'].mean(),
+            'r2': df['repeat_r2'].mean(),
+            'pearson': df['pearson_corr'].mean(),
+            'ccc': df['repeat_ccc'].mean()
+        })
     
     return results
 
-def format_metric(value, std):
-    """格式化指标为均值 ± 标准差"""
-    return f"${value:.4f} \\pm {std:.4f}$"
+def format_metric(value):
+    """格式化单个指标值"""
+    if pd.isna(value):
+        return "-"
+    return f"{value:.4f}"
 
-def generate_latex_table(all_results):
-    """生成 LaTeX 表格，按 Label 分组展示"""
-    if not all_results:
-        return "No results available."
+def generate_csv(all_results, experiments, timestamp):
+    """
+    生成与 ablation_metrics_thr_pool.csv 风格一致的 CSV 文件。
+    格式：
+    - 第1行: 标签名组（每个标签下4个指标位）
+    - 第2行: Experiments, Settings, RMSE, MAE, $R^2$, Pearson $r$, ...
+    - 数据行: 实验分组行 + 实验设置行 + 数据行
+    """
+    csv_out = f"ablation/ablation_tables/ablation_metrics_thr_pool_{timestamp}.csv"
     
-    # 获取所有唯一的 Label
+    # 确保输出目录存在
+    os.makedirs(os.path.dirname(csv_out), exist_ok=True)
+    
+    # 获取所有唯一的 Label 并排序
     all_labels = set()
     for exp_results in all_results.values():
         for r in exp_results:
             all_labels.add(r['label'])
     labels = sorted(all_labels)
     
-    # 表头：每个实验一行，每个 Label 下显示指标
-    header = """\\begin{table}[htbp]
-\\centering
-\\caption{Ablation Study: Consistency Threshold and Pooling Strategy}
-\\begin{tabular}{l|c|c|c|c}
-\\hline
-\\textbf{Experiment} & \\textbf{RMSE} & \\textbf{MAE} & \\textbf{R$^2$} & \\textbf{Pearson r} \\\\"""
+    # 构建第1行：标签组名（简化显示）
+    row1_cols = ["", ""]  # Experiments, Settings
+    for label in labels:
+        label_display = label.replace("nih_", "").replace("_unadjusted", "")
+        row1_cols.extend([label_display, "", "", "", ""])
     
-    rows = []
+    # 构建第2行：指标名称
+    row2_cols = ["Experiments", "Settings"]
+    for _ in labels:
+        row2_cols.extend(["RMSE", "MAE", "$R^2$", "Pearson $r$", "CCC"])
     
-    # 按实验顺序输出
-    for exp_name in all_results.keys():
-        if exp_name not in all_results or not all_results[exp_name]:
-            continue
-            
-        results = all_results[exp_name]
-        
-        # 按 Label 分组输出，每个 Label 一行
-        for r in results:
-            label = r['label']
-            exp_display = f"{exp_name}" if r == results[0] else ""  # 只在第一行显示实验名
-            row = f"\\hline\n{exp_display} ({label}) & {format_metric(r['rmse_mean'], r['rmse_std'])} & {format_metric(r['mae_mean'], r['mae_std'])} & {format_metric(r['r2_mean'], r['r2_std'])} & {format_metric(r['pearson_mean'], r['pearson_std'])} \\\\"
-            rows.append(row)
+    # 构建数据行：每个实验设置一行，包含所有 label 的指标
+    data_rows = []
+    exp_groups = {
+        "Threshold's Impact": ["Thresh (p=0.25)", "Thresh (p=0.50)", "Thresh (p=1.0)"],
+        "Pooling Results' Impact": ["Pooling (GMP Only)", "Pooling (GAP Only)", "Ours"]
+    }
     
-    footer = """\\hline
-\\end{tabular}
-\\label{tab:ablation_threshold_pooling}
-\\end{table}"""
+    for group_name, exp_names in exp_groups.items():
+        for exp_idx, exp_name in enumerate(exp_names):
+            if exp_name in all_results and all_results[exp_name]:
+                # 构建该实验设置的数据行
+                row = [group_name if exp_idx == 0 else "", exp_name]
+                for lbl in labels:
+                    # 查找该实验在该 label 下的结果
+                    label_result = None
+                    for r in all_results[exp_name]:
+                        if r['label'] == lbl:
+                            label_result = r
+                            break
+                    
+                    if label_result:
+                        row.extend([
+                            format_metric(label_result['rmse']),
+                            format_metric(label_result['mae']),
+                            format_metric(label_result['r2']),
+                            format_metric(label_result['pearson']),
+                            format_metric(label_result['ccc'])
+                        ])
+                    else:
+                        row.extend(["", "", "", "", ""])
+                data_rows.append(row)
     
-    return header + "\n" + "\n".join(rows) + "\n" + footer
+    # 写入CSV
+    with open(csv_out, 'w', newline='', encoding='utf-8') as f:
+        writer = pd.DataFrame([row1_cols, row2_cols] + data_rows)
+        writer.to_csv(f, header=False, index=False)
+    
+    return csv_out
+
+def generate_latex(all_results, experiments, timestamp):
+    """
+    生成与 ablation_metrics_thr_pool.csv 风格一致的 LaTeX 三线表。
+    """
+    csv_out = f"ablation/ablation_tables/ablation_metrics_thr_pool_{timestamp}.tex"
+    
+    # 确保输出目录存在
+    os.makedirs(os.path.dirname(csv_out), exist_ok=True)
+    
+    # 获取所有唯一的 Label 并排序
+    all_labels = set()
+    for exp_results in all_results.values():
+        for r in exp_results:
+            all_labels.add(r['label'])
+    labels = sorted(all_labels)
+    
+    # 动态计算列数: 2 (Experiments, Settings) + len(labels) * 5 (每个label 5个指标)
+    n_metrics = 5  # RMSE, MAE, R^2, Pearson r, CCC
+    col_spec = "ll" + "".join(["c" for _ in range(len(labels) * n_metrics)])
+    
+    latex_lines = []
+    latex_lines.append("\\begin{table}[htbp]")
+    latex_lines.append("\\centering")
+    latex_lines.append("\\caption{Ablation Study: Consistency Threshold and Pooling Strategy}")
+    latex_lines.append(f"\\begin{{tabular}}{{{col_spec}}}")
+    latex_lines.append("\\toprule")
+    
+    # 表头行1: 实验分组 + 设置 + 每个Label的列标题（简化显示）
+    header_row1 = "\\textbf{Experiments} & \\textbf{Settings}"
+    for label in labels:
+        label_display = label.replace("nih_", "").replace("_unadjusted", "")
+        header_row1 += f" & \\multicolumn{{{n_metrics}}}{{c}}{{\\textbf{{{label_display}}}}}"
+    header_row1 += " \\\\"
+    latex_lines.append(header_row1)
+    
+    # 表头行2: 指标名称
+    header_row2 = "\\textbf{} & \\textbf{}"
+    for _ in labels:
+        header_row2 += " & \\textbf{RMSE} & \\textbf{MAE} & \\textbf{R$^2$} & \\textbf{Pearson $r$} & \\textbf{CCC}"
+    header_row2 = header_row2.strip() + " \\\\"
+    latex_lines.append("\\midrule")
+    latex_lines.append(header_row2)
+    
+    # 数据行：每个实验设置一行，包含所有 label 的指标
+    exp_groups = {
+        "Threshold's Impact": ["Thresh (p=0.25)", "Thresh (p=0.50)", "Thresh (p=1.0)"],
+        "Pooling Results' Impact": ["Pooling (GMP Only)", "Pooling (GAP Only)", "Ours"]
+    }
+    
+    for group_name, exp_names in exp_groups.items():
+        for exp_idx, exp_name in enumerate(exp_names):
+            if exp_name in all_results and all_results[exp_name]:
+                # 构建该实验设置的数据行
+                row_data = [group_name if exp_idx == 0 else "", exp_name]
+                for lbl in labels:
+                    # 查找该实验在该 label 下的结果
+                    label_result = None
+                    for r in all_results[exp_name]:
+                        if r['label'] == lbl:
+                            label_result = r
+                            break
+                    
+                    if label_result:
+                        row_data.extend([
+                            format_metric(label_result['rmse']),
+                            format_metric(label_result['mae']),
+                            format_metric(label_result['r2']),
+                            format_metric(label_result['pearson']),
+                            format_metric(label_result['ccc'])
+                        ])
+                    else:
+                        row_data.extend(["", "", "", "", ""])
+                latex_lines.append(" & ".join(row_data) + " \\\\")
+    
+    latex_lines.append("\\bottomrule")
+    latex_lines.append("\\end{tabular}")
+    latex_lines.append("\\label{tab:ablation_threshold_pooling}")
+    latex_lines.append("\\end{table}")
+    
+    latex_content = "\n".join(latex_lines)
+    
+    with open(csv_out, 'w', encoding='utf-8') as f:
+        f.write(latex_content)
+    
+    return csv_out, latex_content
+
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description="生成消融实验 Part 2 汇总表格 (阈值和池化策略)")
+    parser.add_argument("--exp_dir", type=str, required=True,
+                        help="消融实验根目录路径 (包含 thresh_*, pool_* 子目录)")
+    parser.add_argument("--ours_exp", type=str, default=None,
+                        help="Ours 实验数据目录路径 (可选，默认为 exp_dir/ours)")
+    return parser.parse_args()
 
 def main():
     print("=" * 80)
@@ -96,15 +251,19 @@ def main():
     print("=" * 80)
     print()
 
-    # 实验配置：阈值和池化策略 (路径相对于项目根目录)
-    timestamp = sys.argv[1]
+    args = parse_args()
+    
+    # 实验配置：阈值和池化策略 (相对于 exp_dir)
+    exp_dir = args.exp_dir
+    ours_exp = args.ours_exp if args.ours_exp else os.path.join(exp_dir, "ours")
+    
     experiments = {
-        "Thresh (p=0.25)": f"results/ablation/{timestamp}/thresh_0.25",
-        "Thresh (p=0.50)": f"results/ablation/{timestamp}/thresh_0.50",
-        # "Ours (Thresh p=0.75, Concat)": f"results/ablation/{timestamp}/ours",
-        "Thresh (p=1.0)": f"results/ablation/{timestamp}/thresh_1.0",
-        "Pooling (GMP Only)": f"results/ablation/{timestamp}/pool_gmp",
-        "Pooling (GAP Only)": f"results/ablation/{timestamp}/pool_gap"
+        "Thresh (p=0.25)": os.path.join(exp_dir, "thresh_0.25"),
+        "Thresh (p=0.50)": os.path.join(exp_dir, "thresh_0.50"),
+        "Thresh (p=1.0)": os.path.join(exp_dir, "thresh_1.0"),
+        "Pooling (GMP Only)": os.path.join(exp_dir, "pool_gmp"),
+        "Pooling (GAP Only)": os.path.join(exp_dir, "pool_gap"),
+        "Ours": ours_exp
     }
     
     # 收集所有实验结果
@@ -118,57 +277,28 @@ def main():
         else:
             print(f"  -> No results found")
     
+    if not all_results:
+        print("\nNo results found. Exiting.")
+        return
+    
     print()
     print("=" * 80)
-    print("Generating LaTeX Table...")
-    print("=" * 80)
+    
+    # 生成时间戳用于文件名
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    
+    # 1. 保存为 CSV
+    csv_out = generate_csv(all_results, experiments, timestamp)
+    print(f"[Success] Ablation summary Part 2 saved to {csv_out}")
+    
+    # 2. 生成并保存 LaTeX 表格
+    tex_out, latex_content = generate_latex(all_results, experiments, timestamp)
+    print(f"[Success] LaTeX table saved to {tex_out}")
+    
     print()
-    
-    latex_table = generate_latex_table(all_results)
-    print(latex_table)
-    
-    # 同时打印 Markdown 表格便于查看
-    print()
-    print("=" * 80)
-    print("Markdown Table (for quick reference)")
-    print("=" * 80)
-    print()
-    
-    md_header = "| Experiment (Label) | RMSE | MAE | R² | Pearson r |"
-    md_sep = "|--------------------|------|-----|----|-----------|"
-    
-    md_rows = []
-    results_for_csv = []
-    for exp_name, exp_path in experiments.items():
-        results = load_experiment_results(exp_path)
-        if results:
-            for r in results:
-                label = r['label']
-                md_rows.append(f"| {exp_name} ({label}) | {r['rmse_mean']:.4f}±{r['rmse_std']:.4f} | {r['mae_mean']:.4f}±{r['mae_std']:.4f} | {r['r2_mean']:.4f}±{r['r2_std']:.4f} | {r['pearson_mean']:.4f}±{r['pearson_std']:.4f} |")
-                results_for_csv.append({
-                    "Experiment": exp_name,
-                    "Label": label,
-                    "RMSE_mean": r['rmse_mean'],
-                    "RMSE_std": r['rmse_std'],
-                    "MAE_mean": r['mae_mean'],
-                    "MAE_std": r['mae_std'],
-                    "R2_mean": r['r2_mean'],
-                    "R2_std": r['r2_std'],
-                    "Pearson_mean": r['pearson_mean'],
-                    "Pearson_std": r['pearson_std']
-                })
-    
-    print(md_header)
-    print(md_sep)
-    for row in md_rows:
-        print(row)
-    
-    # 保存聚合结果为 CSV
-    if results_for_csv:
-        df_summary = pd.DataFrame(results_for_csv)
-        csv_out = f"ablation_metrics_summary_{timestamp}.csv"
-        df_summary.to_csv(csv_out, index=False)
-        print(f"\n[Success] Ablation summary Part 2 saved to {csv_out}")
+    print("================== LaTeX Code for Paper ==================")
+    print(latex_content)
+    print("==========================================================")
 
 if __name__ == "__main__":
     main()

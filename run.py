@@ -15,6 +15,33 @@ from model_r import LGUNet_rela
 from strategies import EarlyStopping, DynamicLearningRateScheduler
 
 
+def concordance_correlation_coefficient(y_true, y_pred):
+    """
+    计算一致性相关系数（CCC, Concordance Correlation Coefficient）。
+    CCC = 2 * cov(y_true, y_pred) / (var(y_true) + var(y_pred) + (mean(y_true) - mean(y_pred))^2)
+    :param y_true: 真实标签，NumPy array
+    :param y_pred: 预测标签，NumPy array
+    :return: CCC值
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+
+    mean_t = np.mean(y_true)
+    mean_p = np.mean(y_pred)
+    var_t = np.var(y_true)
+    var_p = np.var(y_pred)
+
+    cov = np.mean((y_true - mean_t) * (y_pred - mean_p))
+
+    numerator = 2 * cov
+    denominator = var_t + var_p + (mean_t - mean_p) ** 2
+
+    if denominator == 0:
+        return np.nan
+
+    return numerator / denominator
+
+
 def setup_logging(output_root, timestamp=None):
     """设置日志文件，记录终端输出
     
@@ -278,7 +305,7 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
     from sklearn.metrics import r2_score, root_mean_squared_error, mean_absolute_error
     from scipy.stats import pearsonr
 
-    total_rmse, total_mae, total_r2, total_p = [], [], [], []
+    total_rmse, total_mae, total_r2, total_p, total_ccc = [], [], [], [], []
     
     print(f"\n>>> Starting Evaluation for Label: {label_output_dir}")
     for _ in range(args.test_repeat):
@@ -306,6 +333,7 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
             total_mae.append(mean_absolute_error(lb_test, lb_pred))
             total_r2.append(r2_score(lb_test, lb_pred))
             total_p.append(pearsonr(lb_test, lb_pred)[0])
+            total_ccc.append(concordance_correlation_coefficient(lb_test, lb_pred))
 
     # 打印到終端
     print(f"Test Results over {args.test_repeat} repeats:")
@@ -313,13 +341,15 @@ def evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_sc
     print(f"  MAE:  {np.mean(total_mae):.4f} ± {np.std(total_mae):.4f}")
     print(f"  R2:   {np.mean(total_r2):.4f} ± {np.std(total_r2):.4f}")
     print(f"  Pearson r: {np.mean(total_p):.4f} ± {np.std(total_p):.4f}")
+    print(f"  CCC: {np.mean(total_ccc):.4f} ± {np.std(total_ccc):.4f}")
 
     # 保存到 CSV
     df2 = pd.DataFrame({
         "repeat_rmse": total_rmse,
         "repeat_mae": total_mae,
         "repeat_r2": total_r2,
-        "pearson_corr": total_p
+        "pearson_corr": total_p,
+        "repeat_ccc": total_ccc
     })
     df2.to_csv(os.path.join(label_output_dir, "test.csv"), index=False)
 

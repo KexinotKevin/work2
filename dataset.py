@@ -75,6 +75,7 @@ class dataset():
         self.output_dir = output_dir
         self.use_mat_format = False
         self.matDir = None
+        self.cons_thresh = cons_thresh
 
     def dspath_configuration(self, dsType):
         if self.use_dataset_cfg:
@@ -154,7 +155,8 @@ class dataset():
                                   age_col=self.age_col,
                                   output_dir=self.output_dir,
                                   matDir=self.matDir,
-                                  use_mat_format=self.use_mat_format)
+                                  use_mat_format=self.use_mat_format,
+                                  cons_thresh=self.cons_thresh)
         
         train_size = int(split_ratio[0] * len(self.datalist))
         # print(train_size)
