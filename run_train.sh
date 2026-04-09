@@ -8,9 +8,9 @@ source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate gnn_work2
 
 # ============================================
-# 【规范化控制说明】
-# - 默认启用标签和年龄的zscore规范化
-# - 如需禁用规范化，添加 --no_normalize_labels 参数
+# 【多 GPU 并行训练说明】
+# - 使用 torchrun 自动分配所有可见 GPU
+# - 默认使用所有 GPU，可通过 --nproc_per_node 指定卡数
 # ============================================
 
 # 【使用动态学习率调整】
@@ -37,9 +37,13 @@ conda activate gnn_work2
 #     --l2_penalty 0.005 \
 #     --use_early_stopping
 
-# HCD .mat格式测试
-python run.py --use_dataset_cfg \
+# HCD .mat格式测试（10折交叉验证）
+# 使用 torchrun 自动分配所有可见 GPU，支持多卡并行训练
+N_GPUS=${N_GPUS:-$(python -c "import torch; print(torch.cuda.device_count())")}
+echo ">>> Using $N_GPUS GPU(s) for training"
+torchrun --nproc_per_node=$N_GPUS run.py --use_dataset_cfg \
     --num_epochs 100 \
+    --num_folds 10 \
     --dataset_name HCD \
     --atlas_name bna246 \
     --sc_kinds fiber_count \

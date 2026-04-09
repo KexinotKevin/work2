@@ -379,6 +379,18 @@ def setup_logging(output_root, timestamp=None):
     return timestamp, log_dir
 
 
+def _distributed_world_size():
+    return int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def _save_model_checkpoint(model, path):
+    """原子写入，避免写入过程中被 kill 时留下空/截断文件导致 torch.load EOFError。"""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    torch.save(model, tmp)
+    os.replace(tmp, path)
+
+
 def sanitize_name(text):
     keep = []
     for ch in str(text):
@@ -485,7 +497,7 @@ def train_baseline(args, model, trainloader, valloader, optimizer, device, label
 
         if val_loss_v <= min(val_loss_history):
             best_val_epoch = epoch
-            torch.save(model, os.path.join(label_output_dir, "best_validation.pth"))
+            _save_model_checkpoint(model, os.path.join(label_output_dir, "best_validation.pth"))
 
         print(
             "Epoch: {:04d}".format(epoch + 1),
@@ -501,7 +513,7 @@ def train_baseline(args, model, trainloader, valloader, optimizer, device, label
                 print(f"\n>>> Early stopping at epoch {epoch + 1}.")
                 print(f">>> Best validation loss at epoch {early_stopping.get_best_epoch() + 1}")
                 early_stopping.restore_weights(model)
-                torch.save(model, os.path.join(label_output_dir, "best_validation.pth"))
+                _save_model_checkpoint(model, os.path.join(label_output_dir, "best_validation.pth"))
                 break
 
     if early_stopping is None or not early_stopping.should_stop:
@@ -515,6 +527,10 @@ def train_baseline(args, model, trainloader, valloader, optimizer, device, label
 
 def evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_std, checkpoint_path=None):
     ckpt = checkpoint_path if checkpoint_path is not None else os.path.join(label_output_dir, "best_validation.pth")
+    if not os.path.isfile(ckpt) or os.path.getsize(ckpt) == 0:
+        raise FileNotFoundError(
+            f"checkpoint 缺失或为空（可能曾被多进程同时写入损坏）: {ckpt}"
+        )
     model_t = torch.load(ckpt, weights_only=False).to(device)
     model_t.eval()
 
@@ -696,6 +712,10 @@ def parse_args():
     parser.add_argument("--early_stopping_min_epochs", type=int, default=10)
     parser.add_argument("--early_stopping_restore_best", action="store_true", default=True)
 
+    # K折交叉验证参数
+    parser.add_argument("--num_folds", type=int, default=10,
+                        help="Number of folds for cross-validation. Default: 10. Set to 0 or 1 to disable cross-validation.")
+
     return parser.parse_args()
 
 
@@ -716,6 +736,19 @@ def main():
 
     args.relation_num = 2 if args.model_type == "RelGNN" else 0
 
+    import torch.distributed as dist
+    # 本脚本为单进程训练，未接 DDP；多进程同时 torch.save 同一文件会损坏 checkpoint（torch.load EOFError）。
+    ws = _distributed_world_size()
+    if ws > 1:
+        print(
+            ">>> 错误: 检测到 torchrun 多进程 (WORLD_SIZE=%d)。run_baseline.py 未实现 DDP，"
+            "多进程会并发写同一 best_validation.pth 导致损坏。\n"
+            ">>> 请使用: python run_baseline.py ... 或 torchrun --nproc_per_node=1 run_baseline.py ..." % ws
+        )
+        sys.exit(1)
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        print(f">>> 单进程训练；可见 {torch.cuda.device_count()} 张 GPU，默认使用 cuda:0")
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
@@ -779,57 +812,162 @@ def main():
             create_val=True,
         )
 
-        if args.no_normalize_labels or not args.normalize_labels:
-            lb_mean = torch.tensor(0.0, dtype=torch.float64)
-            lb_std = torch.tensor(1.0, dtype=torch.float64)
-            print("Label normalization: DISABLED")
+        # K折交叉验证逻辑
+        num_folds = args.num_folds if args.num_folds > 1 else 1
+        if args.num_folds > 1:
+            print(f"\n>>> {args.num_folds}-Fold Cross-Validation ENABLED")
+            use_kfold = True
+            kfold = dt.get_k_fold_splits(n_splits=num_folds, shuffle=True, random_state=args.seed)
         else:
-            train_labels = torch.tensor([data[1] for data in dt.train_dataset], dtype=torch.float64)
-            lb_mean = train_labels.mean().to(device)
-            lb_std = train_labels.std().to(device)
-            print(f"Label normalization: ENABLED (mean={lb_mean.item():.4f}, std={lb_std.item():.4f})")
+            print(f"\n>>> Cross-validation DISABLED (num_folds={args.num_folds}). Using single split.")
+            use_kfold = False
+        
+        all_fold_results = []
+        
+        if use_kfold:
+            for fold_idx in range(num_folds):
+                print(f"\n{'='*60}")
+                print(f">>> Fold {fold_idx + 1}/{num_folds}")
+                print(f"{'='*60}")
+                
+                fold_label_dir = os.path.join(label_output_dir, f"fold_{fold_idx + 1}")
+                os.makedirs(fold_label_dir, exist_ok=True)
+                
+                trainloader, valloader, testloader = dt.create_k_fold_dataloaders(
+                    kfold,
+                    fold_idx,
+                    args.batch,
+                    labeldim=args.hidden_dimension,
+                    split_ratio=args.split_ratio,
+                    random_state=args.seed,
+                )
+                
+                if args.no_normalize_labels or not args.normalize_labels:
+                    lb_mean = torch.tensor(0.0, dtype=torch.float64)
+                    lb_std = torch.tensor(1.0, dtype=torch.float64)
+                else:
+                    train_labels = torch.tensor([data[1] for data in dt.train_dataset], dtype=torch.float64)
+                    lb_mean = train_labels.mean().to(device)
+                    lb_std = train_labels.std().to(device)
+                
+                model_map = {
+                    "GCN": VanillaGCN,
+                    "GAT": VanillaGAT,
+                    "SAGE": VanillaSAGE,
+                    "RelGNN": VanillaRelGNN,
+                    "BrainGNN": BrainGNNWrapper,
+                    "BrainNetCNN": BrainNetCNNWrapper,
+                    "GraphTransformer": GraphTransformerWrapper,
+                    "BNT": BNTWrapper,
+                    "BrainRGIN": BrainRGINWrapper
+                }
+                model = model_map[args.model_type](args).to(device)
+                
+                optimizer = torch.optim.AdamW(
+                    model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
+                )
+                
+                early_stopping = None
+                if args.use_early_stopping:
+                    early_stopping = EarlyStopping(
+                        patience=args.early_stopping_patience,
+                        min_delta=args.early_stopping_min_delta,
+                        mode='min',
+                        restore_best_weights=args.early_stopping_restore_best,
+                        min_epochs=args.early_stopping_min_epochs,
+                        verbose=True,
+                    )
+                
+                train_baseline(args, model, trainloader, valloader, optimizer, device, fold_label_dir, lb_mean, lb_std, early_stopping, age_scale=100.0)
+                fold_metrics = evaluate_baseline(args, testloader, device, fold_label_dir, lb_mean, lb_std)
+                all_fold_results.append(fold_metrics)
+            
+            print(f"\n{'='*60}")
+            print(f">>> {num_folds}-Fold Cross-Validation Summary")
+            print(f"{'='*60}")
+            
+            metrics_names = ['RMSE', 'MAE', 'R2', 'Pearson_r', 'CCC', 'Bias_Age_Corr']
+            summary_data = {name: [] for name in metrics_names}
+            
+            for i, fold_result in enumerate(all_fold_results):
+                summary_data['RMSE'].append(fold_result['RMSE'])
+                summary_data['MAE'].append(fold_result['MAE'])
+                summary_data['R2'].append(fold_result['R2'])
+                summary_data['Pearson_r'].append(fold_result['Pearson_r'])
+                summary_data['CCC'].append(fold_result['CCC'])
+                summary_data['Bias_Age_Corr'].append(fold_result['Bias_Age_Corr'])
+            
+            summary_df = pd.DataFrame({
+                'Metric': metrics_names,
+                'Mean': [np.mean(summary_data[name]) for name in metrics_names],
+                'Std': [np.std(summary_data[name]) for name in metrics_names]
+            })
+            summary_path = os.path.join(label_output_dir, "cross_validation_summary.csv")
+            summary_df.to_csv(summary_path, index=False)
+            
+            print("\n>>> Cross-Validation Results (Mean ± Std):")
+            for _, row in summary_df.iterrows():
+                print(f"  {row['Metric']}: {row['Mean']:.4f} ± {row['Std']:.4f}")
+            print(f"\n>>> Summary saved to: {summary_path}")
+            
+            # 使用交叉验证的平均结果作为该 label 的最终结果
+            final_results = {
+                "RMSE": summary_df[summary_df['Metric']=='RMSE']['Mean'].values[0],
+                "RMSE_std": summary_df[summary_df['Metric']=='RMSE']['Std'].values[0],
+                "MAE": summary_df[summary_df['Metric']=='MAE']['Mean'].values[0],
+                "MAE_std": summary_df[summary_df['Metric']=='MAE']['Std'].values[0],
+                "R2": summary_df[summary_df['Metric']=='R2']['Mean'].values[0],
+                "R2_std": summary_df[summary_df['Metric']=='R2']['Std'].values[0],
+                "Pearson_r": summary_df[summary_df['Metric']=='Pearson_r']['Mean'].values[0],
+                "Pearson_r_std": summary_df[summary_df['Metric']=='Pearson_r']['Std'].values[0],
+                "CCC": summary_df[summary_df['Metric']=='CCC']['Mean'].values[0],
+                "CCC_std": summary_df[summary_df['Metric']=='CCC']['Std'].values[0],
+                "Bias_Age_Corr": summary_df[summary_df['Metric']=='Bias_Age_Corr']['Mean'].values[0],
+                "Bias_Age_Corr_std": summary_df[summary_df['Metric']=='Bias_Age_Corr']['Std'].values[0],
+            }
+        else:
+            # 单次训练模式
+            trainloader = dt.train_dataloader(batchsize=args.batch)
+            valloader = dt.val_dataloader()
+            testloader = dt.test_dataloader()
+            print("dataset loaded for label: {}".format(label))
 
-        trainloader = dt.train_dataloader(batchsize=args.batch)
-        valloader = dt.val_dataloader()
-        testloader = dt.test_dataloader()
-        print("dataset loaded for label: {}".format(label))
+            model_map = {
+                "GCN": VanillaGCN,
+                "GAT": VanillaGAT,
+                "SAGE": VanillaSAGE,
+                "RelGNN": VanillaRelGNN,
+                "BrainGNN": BrainGNNWrapper,
+                "BrainNetCNN": BrainNetCNNWrapper,
+                "GraphTransformer": GraphTransformerWrapper,
+                "BNT": BNTWrapper,
+                "BrainRGIN": BrainRGINWrapper
+            }
+            model = model_map[args.model_type](args).to(device)
 
-        model_map = {
-            "GCN": VanillaGCN,
-            "GAT": VanillaGAT,
-            "SAGE": VanillaSAGE,
-            "RelGNN": VanillaRelGNN,
-            "BrainGNN": BrainGNNWrapper,         # 之前加的
-            "BrainNetCNN": BrainNetCNNWrapper,   # 新增
-            "GraphTransformer": GraphTransformerWrapper, # 新增
-            "BNT": BNTWrapper,                   # 新增
-            "BrainRGIN": BrainRGINWrapper        # 新增
-        }
-        model = model_map[args.model_type](args).to(device)
-
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
-        )
-
-        early_stopping = None
-        if args.use_early_stopping:
-            early_stopping = EarlyStopping(
-                patience=args.early_stopping_patience,
-                min_delta=args.early_stopping_min_delta,
-                mode='min',
-                restore_best_weights=args.early_stopping_restore_best,
-                min_epochs=args.early_stopping_min_epochs,
-                verbose=True,
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
             )
-            print(f"Early Stopping ENABLED: patience={args.early_stopping_patience}")
 
-        train_baseline(args, model, trainloader, valloader, optimizer, device, label_output_dir, lb_mean, lb_std, early_stopping, age_scale=100.0)
-        summary_results = evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_std)
+            early_stopping = None
+            if args.use_early_stopping:
+                early_stopping = EarlyStopping(
+                    patience=args.early_stopping_patience,
+                    min_delta=args.early_stopping_min_delta,
+                    mode='min',
+                    restore_best_weights=args.early_stopping_restore_best,
+                    min_epochs=args.early_stopping_min_epochs,
+                    verbose=True,
+                )
+                print(f"Early Stopping ENABLED: patience={args.early_stopping_patience}")
+
+            train_baseline(args, model, trainloader, valloader, optimizer, device, label_output_dir, lb_mean, lb_std, early_stopping, age_scale=100.0)
+            final_results = evaluate_baseline(args, testloader, device, label_output_dir, lb_mean, lb_std)
         
         # 收集该 label 的结果用于汇总
         if 'all_label_results' not in locals():
             all_label_results = {}
-        all_label_results[label] = summary_results
+        all_label_results[label] = final_results
     
     # 保存汇总结果到 CSV（包含 GRL 开关状态）
     save_summary_results(

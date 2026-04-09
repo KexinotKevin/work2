@@ -7,11 +7,19 @@ conda activate gnn_work2
 
 export PYTHONPATH="$(pwd)/../../":$PYTHONPATH
 
+# ============================================
+# 【GPU 说明】run_baseline.py 为单进程训练（未接 DDP）。
+# 请勿用 torchrun --nproc_per_node>1，否则会并发写同一 checkpoint 导致 EOFError。
+# 指定单卡: CUDA_VISIBLE_DEVICES=0 bash run_baseline.sh
+# ============================================
+
+echo ">>> Single-process Python training (one GPU: cuda:0 among visible devices)"
+
 # 生成共享时间戳，所有模型的结果保存到同一文件夹
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 OUTPUT_ROOT="../results/baseline_hcd/${TIMESTAMP}"
 
-MODELS=("GraphTransformer" "BNT" "BrainRGIN")
+MODELS=("BrainGNN" "GraphTransformer" "BNT" "BrainRGIN")
 # 加入新的三个模型
 MODALITIES=("SC" "FC" "SC_FC")
 # MODALITIES=("SC" "FC")
@@ -35,6 +43,7 @@ for MODEL in "${MODELS[@]}"; do
             --modality ${MOD} \
             --use_dataset_cfg \
             --num_epochs 100 \
+            --num_folds 5 \
             --dataset_name HCD \
             --atlas_name bna246 \
             --num_nodes 246 \

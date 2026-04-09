@@ -1,6 +1,7 @@
 import argparse
 import glob
 import json
+import math
 import os
 import sys
 import time
@@ -88,12 +89,15 @@ def build_combo_dir(args, timestamp):
 def train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, 
           lb_mean, lb_std, age_scale=100.0, use_dynamic_lr=False, dynamic_scheduler=None,
           early_stopping=None, testloader=None):
+    os.makedirs(label_output_dir, exist_ok=True)
     train_loss = []
     val_loss = []
     lr_history = []
     grad_norm_history = []
     epochs_trained = 0  # 记录实际训练轮数
     best_val_epoch = 0  # 记录最佳验证 loss 的 epoch
+    best_train_loss = float("inf")
+    best_val_loss = float("inf")
     tmp_train = os.path.join(label_output_dir, "bt_tmp.pth")
     tmp_val = os.path.join(label_output_dir, "bv_tmp.pth")
     remove_pattern(os.path.join(label_output_dir, "bt_tmp*.pth"))
@@ -196,7 +200,7 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
         epochs_trained = epoch + 1
         
         # 记录最佳 epoch
-        if val_loss_v <= min(val_loss):
+        if math.isfinite(val_loss_v) and val_loss_v <= best_val_loss:
             best_val_epoch = epoch
         
         print(
@@ -208,9 +212,11 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
             "time: {:.4f}s".format(time.time() - t),
         )
 
-        if train_loss_v <= min(train_loss):
+        if math.isfinite(train_loss_v) and train_loss_v <= best_train_loss:
+            best_train_loss = train_loss_v
             torch.save(model, tmp_train)
-        if val_loss_v <= min(val_loss):
+        if math.isfinite(val_loss_v) and val_loss_v <= best_val_loss:
+            best_val_loss = val_loss_v
             torch.save(model, tmp_val)
         
         # ====== 【早停检查】 ======
@@ -236,12 +242,20 @@ def train(args, model, trainloader, valloader, optimizer, scheduler, device, lab
 
     best_train_path = os.path.join(label_output_dir, "best_train.pth")
     best_val_path = os.path.join(label_output_dir, "best_validation.pth")
-    if os.path.exists(best_train_path):
-        os.remove(best_train_path)
-    if os.path.exists(best_val_path):
-        os.remove(best_val_path)
-    os.replace(tmp_train, best_train_path)
-    os.replace(tmp_val, best_val_path)
+    if os.path.isfile(tmp_train):
+        os.replace(tmp_train, best_train_path)
+    elif not os.path.isfile(best_train_path):
+        torch.save(model, best_train_path)
+        print(
+            ">>> Warning: bt_tmp.pth was missing; saved current model weights to best_train.pth."
+        )
+    if os.path.isfile(tmp_val):
+        os.replace(tmp_val, best_val_path)
+    elif not os.path.isfile(best_val_path):
+        torch.save(model, best_val_path)
+        print(
+            ">>> Warning: bv_tmp.pth was missing; saved current model weights to best_validation.pth."
+        )
     
     # ====== 【保存最佳验证模型的 Saliency Map】 ======
     # 使用验证集数据生成 saliency map 并保存
@@ -447,6 +461,10 @@ def parse_args():
                         help="Enable zscore normalization for cognition labels and age (default: enabled)")
     parser.add_argument("--no_normalize_labels", action="store_true",
                         help="Disable zscore normalization for cognition labels and age")
+
+    # K折交叉验证参数
+    parser.add_argument("--num_folds", type=int, default=10,
+                        help="Number of folds for cross-validation. Default: 10. Set to 0 or 1 to disable cross-validation.")
     
     # 动态学习率参数
     parser.add_argument("--use_dynamic_lr", action="store_true", default=False,
@@ -494,6 +512,15 @@ def main():
         args.relation_num = len(args.sc_kinds_resolved) + 2
     print("relation_num (edge_attr channels): {}".format(args.relation_num))
 
+    import torch.distributed as dist
+    # 分布式训练初始化（支持 torchrun 多卡）
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        local_rank = int(os.environ.get('LOCAL_RANK', 0))
+        if local_rank == 0:
+            print(f">>> Distributed training: RANK={os.environ.get('RANK')}, WORLD_SIZE={os.environ.get('WORLD_SIZE')}")
+    elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        print(f">>> Single process with {torch.cuda.device_count()} GPUs (DataParallel mode)")
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if torch.cuda.is_available():
         torch.cuda.manual_seed(args.seed)
@@ -608,12 +635,119 @@ def main():
                   f"min_epochs={args.early_stopping_min_epochs}, "
                   f"restore_best={args.early_stopping_restore_best}")
 
-        # (這裡是你原本 main 函數結尾的調用部分，請替換成下面這樣)
-        train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, 
-              lb_mean, lb_std, age_scale, use_dynamic_lr=args.use_dynamic_lr, 
-              dynamic_scheduler=dynamic_scheduler, early_stopping=early_stopping,
-              testloader=testloader)
-        evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale)
+        # K折交叉验证逻辑
+        num_folds = args.num_folds if args.num_folds > 1 else 1
+        if args.num_folds > 1:
+            print(f"\n>>> {args.num_folds}-Fold Cross-Validation ENABLED")
+            use_kfold = True
+            kfold = dt.get_k_fold_splits(n_splits=num_folds, shuffle=True, random_state=args.seed)
+        else:
+            print(f"\n>>> Cross-validation DISABLED (num_folds={args.num_folds}). Using single split.")
+            use_kfold = False
+        
+        all_fold_results = []
+        
+        if use_kfold:
+            for fold_idx in range(num_folds):
+                print(f"\n{'='*60}")
+                print(f">>> Fold {fold_idx + 1}/{num_folds}")
+                print(f"{'='*60}")
+                
+                fold_label_dir = os.path.join(label_output_dir, f"fold_{fold_idx + 1}")
+                os.makedirs(fold_label_dir, exist_ok=True)
+                
+                trainloader, valloader, testloader = dt.create_k_fold_dataloaders(
+                    kfold,
+                    fold_idx,
+                    args.batch,
+                    labeldim=args.hidden_dimension,
+                    split_ratio=args.split_ratio,
+                    random_state=args.seed,
+                )
+                
+                if args.no_normalize_labels or not args.normalize_labels:
+                    lb_mean = torch.tensor(0.0, dtype=torch.float64)
+                    lb_std = torch.tensor(1.0, dtype=torch.float64)
+                    age_scale = 1.0
+                else:
+                    train_labels = torch.tensor([data[1] for data in dt.train_dataset], dtype=torch.float64)
+                    lb_mean = train_labels.mean().to(device)
+                    lb_std = train_labels.std().to(device)
+                    age_scale = 100.0
+                
+                model = LGUNet_rela(args).to(device)
+                optimizer = torch.optim.AdamW(
+                    model.parameters(), lr=args.learning_rate, weight_decay=args.l2_penalty
+                )
+                
+                dynamic_scheduler = None
+                if args.use_dynamic_lr:
+                    dynamic_scheduler = DynamicLearningRateScheduler(
+                        optimizer=optimizer, base_lr=args.learning_rate,
+                        min_lr=args.min_lr, patience=args.lr_patience,
+                        factor=args.lr_factor, warmup_epochs=args.warmup_epochs,
+                    )
+                    scheduler = None
+                else:
+                    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                        optimizer, milestones=[30, 60, 80], gamma=0.5
+                    )
+                
+                early_stopping = None
+                if args.use_early_stopping:
+                    early_stopping = EarlyStopping(
+                        patience=args.early_stopping_patience,
+                        min_delta=args.early_stopping_min_delta,
+                        mode='min',
+                        restore_best_weights=args.early_stopping_restore_best,
+                        min_epochs=args.early_stopping_min_epochs,
+                        verbose=True,
+                    )
+                
+                train(args, model, trainloader, valloader, optimizer, scheduler, device, fold_label_dir, 
+                      lb_mean, lb_std, age_scale, use_dynamic_lr=args.use_dynamic_lr, 
+                      dynamic_scheduler=dynamic_scheduler, early_stopping=early_stopping,
+                      testloader=testloader)
+                
+                fold_metrics = evaluate(args, testloader, device, fold_label_dir, lb_mean, lb_std, age_scale)
+                all_fold_results.append(fold_metrics)
+            
+            print(f"\n{'='*60}")
+            print(f">>> {num_folds}-Fold Cross-Validation Summary")
+            print(f"{'='*60}")
+            
+            metrics_names = ['RMSE', 'MAE', 'R2', 'Pearson r', 'CCC']
+            summary_data = {name: [] for name in metrics_names}
+            
+            for i, fold_result in enumerate(all_fold_results):
+                fold_csv = pd.read_csv(os.path.join(label_output_dir, f"fold_{i + 1}", "test.csv"))
+                summary_data['RMSE'].append(fold_csv['repeat_rmse'].mean())
+                summary_data['MAE'].append(fold_csv['repeat_mae'].mean())
+                summary_data['R2'].append(fold_csv['repeat_r2'].mean())
+                summary_data['Pearson r'].append(fold_csv['pearson_corr'].mean())
+                summary_data['CCC'].append(fold_csv['repeat_ccc'].mean())
+            
+            summary_df = pd.DataFrame({
+                'Metric': metrics_names,
+                'Mean': [np.mean(summary_data[name]) for name in metrics_names],
+                'Std': [np.std(summary_data[name]) for name in metrics_names]
+            })
+            summary_path = os.path.join(label_output_dir, "cross_validation_summary.csv")
+            summary_df.to_csv(summary_path, index=False)
+            
+            print("\n>>> Cross-Validation Results (Mean ± Std):")
+            for _, row in summary_df.iterrows():
+                print(f"  {row['Metric']}: {row['Mean']:.4f} ± {row['Std']:.4f}")
+            print(f"\n>>> Summary saved to: {summary_path}")
+        else:
+            # 单次训练模式
+            trainloader = dt.train_dataloader(batchsize=args.batch)
+            
+            train(args, model, trainloader, valloader, optimizer, scheduler, device, label_output_dir, 
+                  lb_mean, lb_std, age_scale, use_dynamic_lr=args.use_dynamic_lr, 
+                  dynamic_scheduler=dynamic_scheduler, early_stopping=early_stopping,
+                  testloader=testloader)
+            evaluate(args, testloader, device, label_output_dir, lb_mean, lb_std, age_scale)
 
 
 if __name__ == "__main__":
